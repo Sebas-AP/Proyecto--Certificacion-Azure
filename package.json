@@ -1,0 +1,33 @@
+{
+  "name": "gorditasos",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Plataforma multisucursal para la operacion de restaurantes de gorditas",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch apps/api/src/server.ts",
+    "dev:all": "bash scripts/levantar.sh",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/apps/api/src/server.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:migrate": "psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f infrastructure/migrations/001_initial_core.sql -f infrastructure/migrations/002_catalog_orders.sql",
+    "db:seed": "tsx apps/api/src/seed.ts"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/cors": "^11.0.0",
+    "bcryptjs": "^3.0.2",
+    "dotenv": "^17.2.1",
+    "fastify": "^5.4.0",
+    "pg": "^8.16.3",
+    "zod": "^4.0.10"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "@types/pg": "^8.15.5",
+    "tsx": "^4.20.3",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}
