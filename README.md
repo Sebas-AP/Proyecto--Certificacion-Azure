@@ -15,6 +15,10 @@ Implementada la Fase 0 y el primer núcleo de la Fase 1:
 
 Fase 2 implementada: catálogo, mesas y pedidos. La primera interfaz operativa de Fase 3 vive en `apps/web`: meseros, sesión por cookie, pedidos enviados a cocina y una vista de cocina preparada para su contrato de tickets. Caja, pagos, inventario, mensajería e IA siguen fuera de alcance.
 
+Fase 4 implementada: sesiones de caja, pagos mixtos en efectivo/tarjeta/transferencia, cierres, idempotencia, movimientos manuales `IN/OUT`, solicitudes/aprobaciones de reembolso y consulta de pedidos pendientes. No se almacenan datos de tarjetas.
+
+Fase 5 piloto implementada: reportes básicos de ventas y operación, con filtros UTC explícitos, aislamiento por empresa/sucursales autorizadas y exportación CSV auditada. Inventario avanzado, compras, WhatsApp e IA siguen fuera de alcance.
+
 ## Requisitos
 
 - Node.js 22 o posterior.
@@ -51,9 +55,17 @@ npm run db:migrate
 npm run dev
 ```
 
-La API queda disponible en `http://localhost:4000` y su comprobación es `GET /health`.
+La API queda disponible en `http://localhost:4000`. Sus comprobaciones de salud son `GET /health/live` (proceso activo, sin base de datos) y `GET /health/ready` (PostgreSQL disponible). `GET /health` se conserva como alias compatible de `live`.
 
 `DATABASE_URL`, `SESSION_SECRET` y `CORS_ORIGIN` deben definirse en `.env`; para desarrollo web usa `CORS_ORIGIN=http://localhost:5173`. Nunca se deben agregar secretos al repositorio.
+
+## CI
+
+GitHub Actions ejecuta CI en cada `push` y `pull request` con Node.js 22. El job
+principal instala dependencias con `npm ci`, ejecuta `npm run build:all` y
+`npm test`, usando la cache de npm. Un job separado levanta PostgreSQL 17 y
+ejecuta `npm run db:migrate` dos veces para comprobar que las migraciones son
+repetibles. No requiere secretos ni realiza despliegues.
 
 ### Interfaz web / PWA
 
@@ -69,7 +81,7 @@ La aplicación incluye `manifest.webmanifest` y un service worker base. El cache
 
 ## Fase 2
 
-Ejecuta las migraciones versionadas en orden con `npm run db:migrate` y carga el administrador de demostración con `SEED_ADMIN_PASSWORD='una-clave-de-12-o-mas' npm run db:seed`.
+Ejecuta las migraciones versionadas en orden, incluida caja y pagos, con `npm run db:migrate` y carga el administrador de demostración con `SEED_ADMIN_PASSWORD='una-clave-de-12-o-mas' npm run db:seed`.
 
 Endpoints autenticados principales:
 
@@ -107,4 +119,27 @@ Endpoints autenticados, limitados a la empresa y sucursal asignada al usuario:
 
 Las transiciones requieren `kitchen.manage` y un `idempotencyKey`; la consulta y SSE requieren `kitchen.read`. El envío existente publica `order.sent_to_kitchen` y las transiciones publican `order.kitchen_status_changed`. El SSE usa memoria del proceso: no es un bus distribuido entre réplicas y no recupera eventos perdidos durante una desconexión; la pantalla debe volver a consultar la lista.
 
+## Fase 4: caja y pagos
+
+Endpoints autenticados y aislados por empresa y sucursal asignada:
+
+- `POST /api/v1/branches/:branchId/cash-sessions/open` con `{ "openingCash": 500, "cashRegisterId": "..." }`.
+- `GET /api/v1/branches/:branchId/cash-sessions/current` devuelve la sesión abierta.
+- `POST /api/v1/cash-sessions/:id/movements` registra movimientos `IN/OUT` con motivo.
+- `GET /api/v1/orders/:id/payments` consulta los pagos del pedido.
+- `POST /api/v1/orders/:id/payments` recibe `{ "method": "CASH|CARD|TRANSFER", "amount": 100, "cashReceived": 100, "idempotencyKey": "..." }`.
+- `POST /api/v1/cash-sessions/:id/close` recibe `{ "countedCash": 500, "closingNote": "..." }`.
+
+La suma de pagos no puede sobrepasar el total. La orden pasa a `COMPLETED` solo cuando se cubre exactamente, y los pagos concurrentes bloquean la orden con `SELECT FOR UPDATE`. Permisos: `cash.read`, `cash.open`, `cash.charge` y `cash.close`. La API devuelve `401` para sesión ausente, `403` para permisos o sucursal, y `409` para conflictos de caja o pago.
+
 Antes de cargar datos reales deben confirmarse la marca, sucursales, zona horaria, políticas de acceso, retención de datos y responsables de aprobación. Los nombres, precios, horarios, permisos y métodos de pago no se codificarán como reglas fijas.
+
+## Fase 5: piloto y reportes básicos
+
+Los reportes requieren autenticación y fechas obligatorias en formato `YYYY-MM-DD`; `dateTo` es exclusivo y se interpreta a medianoche UTC. La base de datos almacena y filtra `TIMESTAMPTZ` en UTC.
+
+- `GET /api/v1/reports/sales-summary?dateFrom=2026-09-01&dateTo=2026-09-05` devuelve ventas de pedidos `COMPLETED`, pedidos pagados, ticket promedio, importes por `CASH/CARD/TRANSFER` y pedidos `CANCELLED`.
+- `GET /api/v1/reports/sales-summary.csv?...` exporta el mismo resumen como CSV con `Content-Disposition`; la exportación genera auditoría.
+- `GET /api/v1/reports/operations-summary?...` devuelve pedidos abiertos, comandas pendientes, comandas retrasadas (más de 15 minutos), mesas ocupadas/abiertas y productos no disponibles.
+
+Permisos: una consulta con `branchId` requiere `report.branch.read`; una consulta sin sucursal requiere `report.company.read` y solo agrega sucursales asignadas al usuario. La exportación requiere además `export.read`.

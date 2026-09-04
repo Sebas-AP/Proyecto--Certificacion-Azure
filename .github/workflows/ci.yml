@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  quality:
+    name: Build and test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build all
+        run: npm run build:all
+
+      - name: Run tests
+        run: npm test
+
+  migrations:
+    name: Repeatable migrations
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: gorditasos
+          POSTGRES_USER: gorditas
+          POSTGRES_PASSWORD: gorditas
+        options: >-
+          --health-cmd "pg_isready -U gorditas -d gorditasos"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install --yes postgresql-client
+
+      - name: Apply migrations
+        env:
+          DATABASE_URL: postgresql://gorditas:gorditas@localhost:5432/gorditasos
+        run: npm run db:migrate
+
+      - name: Re-apply migrations
+        env:
+          DATABASE_URL: postgresql://gorditas:gorditas@localhost:5432/gorditasos
+        run: npm run db:migrate

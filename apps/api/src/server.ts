@@ -4,16 +4,34 @@ import cors from '@fastify/cors';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
 import { config } from './config.js';
-import { pool } from './db.js';
+import { classifyReadiness, pool } from './db.js';
 import { createSession, requireUser, sessionCookieOptions, userHasPermission, verifyPassword } from './auth.js';
 import { registerCatalogOrderRoutes } from './catalog-orders.js';
 import { registerKitchenRoutes } from './kitchen.js';
+import { registerCashPaymentRoutes } from './cash-payments.js';
+import { registerReportRoutes } from './reports.js';
 
 const app = Fastify({ logger: true });
 await app.register(cookie);
 await app.register(cors, { origin: config.CORS_ORIGIN, credentials: true });
 
-app.get('/health', async () => ({ status: 'ok', service: 'gorditasos-api' }));
+const liveHealthResponse = { status: 'ok', service: 'gorditasos-api' };
+
+app.get('/health/live', async () => liveHealthResponse);
+
+app.get('/health/ready', async (_request, reply) => {
+  try {
+    await pool.query('SELECT 1');
+    const readiness = classifyReadiness(true);
+    return reply.code(readiness.statusCode).send(readiness.body);
+  } catch {
+    app.log.warn('Database readiness check failed');
+    const readiness = classifyReadiness(false);
+    return reply.code(readiness.statusCode).send(readiness.body);
+  }
+});
+
+app.get('/health', async () => liveHealthResponse);
 
 app.post('/api/v1/auth/login', async (request, reply) => {
   const input = z.object({ email: z.string().email(), password: z.string().min(1) }).safeParse(request.body);
@@ -101,6 +119,8 @@ app.post('/api/v1/shifts/:id/close', { preHandler: requireUser }, async (request
 
 await registerCatalogOrderRoutes(app);
 await registerKitchenRoutes(app);
+await registerCashPaymentRoutes(app);
+await registerReportRoutes(app);
 
 app.setErrorHandler((error, _request, reply) => {
   app.log.error(error);

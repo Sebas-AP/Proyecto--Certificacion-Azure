@@ -15,7 +15,7 @@
     "start": "node dist/apps/api/src/server.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "db:migrate": "psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f infrastructure/migrations/001_initial_core.sql -f infrastructure/migrations/002_catalog_orders.sql -f infrastructure/migrations/003_kitchen.sql",
+    "db:migrate": "psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f infrastructure/migrations/001_initial_core.sql -f infrastructure/migrations/002_catalog_orders.sql -f infrastructure/migrations/003_kitchen.sql -f infrastructure/migrations/004_cash_payments.sql -f infrastructure/migrations/005_reports_pilot.sql",
     "db:seed": "tsx apps/api/src/seed.ts"
   },
   "dependencies": {
