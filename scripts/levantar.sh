@@ -38,4 +38,8 @@ else
 fi
 
 echo "Iniciando API en http://localhost:4000"
-exec npm run dev
+npm run dev &
+API_PID=$!
+trap 'kill "$API_PID" 2>/dev/null || true' EXIT INT TERM
+echo "Iniciando PWA en http://localhost:5173"
+exec npm run dev:web

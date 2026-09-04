@@ -7,6 +7,7 @@ import { config } from './config.js';
 import { pool } from './db.js';
 import { createSession, requireUser, sessionCookieOptions, userHasPermission, verifyPassword } from './auth.js';
 import { registerCatalogOrderRoutes } from './catalog-orders.js';
+import { registerKitchenRoutes } from './kitchen.js';
 
 const app = Fastify({ logger: true });
 await app.register(cookie);
@@ -99,6 +100,7 @@ app.post('/api/v1/shifts/:id/close', { preHandler: requireUser }, async (request
 });
 
 await registerCatalogOrderRoutes(app);
+await registerKitchenRoutes(app);
 
 app.setErrorHandler((error, _request, reply) => {
   app.log.error(error);
