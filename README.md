@@ -184,3 +184,17 @@ La pestaña `Inventario` se autentica con la misma sesión y agrupa cinco subvis
 - **Catálogo**: alta y listado de ingredientes (con unidad base) y almacenes de la sucursal activa.
 
 Los consumos teóricos de las ventas completadas y las transferencias entre almacenes aparecen en el histórico de **Movimientos**. Los permisos degradan la interfaz de forma natural: un rol sin `inventory.*` o `recipe.*` verá los errores `403` de la API. Los datos demo se cargan con `npm run db:seed` (ver apartado de seed) y se limpiaron las empresas demo duplicadas de corridas previas.
+
+## Fase 8: compras y proveedores (backend)
+
+La migración `008_purchasing.sql` crea proveedores, secuencias de orden por sucursal, órdenes de compra (estados `DRAFT`/`PARTIALLY_RECEIVED`/`RECEIVED`/`CANCELLED` e idempotencia por `idempotency_key`), ítems con cantidad recibida (`received_quantity`), recepciones por almacén con `idempotency_key` única y el histórico de costos `ingredient_costs`. Permisos nuevos: `purchase.read`, `purchase.manage` y `purchase.receive`.
+
+Endpoints autenticados:
+
+- `GET/POST /api/v1/suppliers` listan y crean proveedores por empresa (409 ante duplicado por nombre).
+- `GET /api/v1/purchase-orders?branchId=...&status=...` lista órdenes con nombre del proveedor; `GET /api/v1/purchase-orders/:id` trae detalle con ítems y recepciones.
+- `POST /api/v1/purchase-orders` crea una orden con `{ branchId, supplierId, idempotencyKey, items: [{ ingredientId, quantity, unitId, unitPrice }] }`. Si la unidad del ítem difiere de la unidad base del ingrediente se exige una conversión definida en `unit-conversions`.
+- `POST /api/v1/purchase-orders/:id/receive` registra una recepción completa o parcial con `{ warehouseId, idempotencyKey, items: [{ ingredientId, quantityReceived }] }`. En la misma transacción acumula `received_quantity`, registra movimientos `PURCHASE` (referenciando la recepción; cantidad en la unidad del pedido y saldo en unidad base vía conversión), escribe asientos en `ingredient_costs` con el `unitPrice` de la orden y avanza a `PARTIALLY_RECEIVED` o `RECEIVED`. Recibir más de lo pedido, líneas ya completas u órdenes `RECEIVED`/`CANCELLED` responden `409`; reintentar con la misma `idempotency_key` devuelve la recepción previa sin duplicar existencias.
+- `POST /api/v1/purchase-orders/:id/cancel` cancela una orden solo en `DRAFT`.
+
+Las órdenes, recepciones y cancelaciones generan auditoría. El seed demo crea el proveedor "Proveedor de demostracion".

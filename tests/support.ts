@@ -17,6 +17,7 @@ const MIGRATIONS = [
   '005_reports_pilot.sql',
   '006_inventory.sql',
   '007_inventory_consumption.sql',
+  '008_purchasing.sql',
 ];
 
 export async function migrate(): Promise<void> {
@@ -112,6 +113,12 @@ async function deleteCompanyData(client: { query: (text: string, values?: unknow
   await client.query(`DELETE FROM waste_records WHERE company_id=$1`, [companyId]);
   await client.query(`DELETE FROM stock_movements WHERE company_id=$1`, [companyId]);
   await client.query(`DELETE FROM stock_balances WHERE company_id=$1`, [companyId]);
+  await client.query(`DELETE FROM ingredient_costs WHERE company_id=$1`, [companyId]);
+  await client.query(`DELETE FROM purchase_receipt_items WHERE purchase_receipt_id IN (SELECT id FROM purchase_receipts WHERE company_id=$1)`, [companyId]);
+  await client.query(`DELETE FROM purchase_receipts WHERE company_id=$1`, [companyId]);
+  await client.query(`DELETE FROM purchase_order_items WHERE purchase_order_id IN (SELECT id FROM purchase_orders WHERE company_id=$1)`, [companyId]);
+  await client.query(`DELETE FROM purchase_orders WHERE company_id=$1`, [companyId]);
+  await client.query(`DELETE FROM suppliers WHERE company_id=$1`, [companyId]);
   await client.query(`DELETE FROM recipe_items WHERE recipe_version_id IN (SELECT rv.id FROM recipe_versions rv JOIN recipes r ON r.id=rv.recipe_id WHERE r.company_id=$1)`, [companyId]);
   await client.query(`DELETE FROM recipe_versions WHERE recipe_id IN (SELECT id FROM recipes WHERE company_id=$1)`, [companyId]);
   await client.query(`DELETE FROM recipes WHERE company_id=$1`, [companyId]);
@@ -137,6 +144,7 @@ async function deleteCompanyData(client: { query: (text: string, values?: unknow
   await client.query(`DELETE FROM branches WHERE company_id=$1`, [companyId]);
   await client.query(`DELETE FROM roles WHERE company_id=$1`, [companyId]);
   await client.query(`DELETE FROM payment_method_configs WHERE company_id=$1`, [companyId]);
+  await client.query(`DELETE FROM branch_purchase_sequences WHERE branch_id IN (SELECT id FROM branches WHERE company_id=$1)`, [companyId]);
   await client.query(`DELETE FROM unit_conversions WHERE company_id=$1`, [companyId]);
   await client.query(`DELETE FROM companies WHERE id=$1`, [companyId]);
   await client.query(`ALTER TABLE stock_counts ENABLE TRIGGER stock_counts_immutable`);

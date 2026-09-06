@@ -558,3 +558,146 @@ describe('transferencias y concurrencia de inventario', () => {
     expect(consumed).toHaveLength(1);
   });
 });
+
+describe('compras y proveedores', () => {
+  let kgUnitId: string;
+  let gUnitId: string;
+  let warehouseId: string;
+  let supplierId: string;
+  let poId: string;
+  let ingredientId: string;
+  let salsaId: string;
+  let limitedCookie: string;
+
+  beforeAll(async () => {
+    const kg = await pool.query(`SELECT id FROM units WHERE code='KG' LIMIT 1`);
+    kgUnitId = kg.rows[0].id;
+    const g = await pool.query(`SELECT id FROM units WHERE code='G' LIMIT 1`);
+    gUnitId = g.rows[0].id;
+    const warehouse = await pool.query(`SELECT id FROM warehouses WHERE company_id=$1 AND branch_id=$2 AND is_active ORDER BY name LIMIT 1`, [env.companyId, env.branchId]);
+    warehouseId = warehouse.rows[0].id;
+    limitedCookie = await login('limitado@prueba.local', 'PruebaSegura$2026');
+  });
+
+  function balanceOf(rows: any[], ingredientIdValue: string, warehouseIdValue: string) {
+    return Number(rows.find((b: any) => b.ingredient_id === ingredientIdValue && b.warehouse_id === warehouseIdValue).quantity);
+  }
+
+  it('registra un proveedor y lo lista, con control de permisos', async () => {
+    const created = await call(adminCookie, 'POST', '/api/v1/suppliers', { name: 'Tortilleria Central', taxId: 'TCE920101AA1', contactName: 'Ana', phone: '555-1000' });
+    expect(created.status).toBe(201);
+    expect(created.json.data.id).toBeTruthy();
+    supplierId = created.json.data.id;
+
+    const listed = await call(adminCookie, 'GET', '/api/v1/suppliers');
+    expect(listed.status).toBe(200);
+    expect(listed.json.data.some((s: { id: string; name: string }) => s.id === supplierId && s.name === 'Tortilleria Central')).toBe(true);
+
+    const duplicate = await call(adminCookie, 'POST', '/api/v1/suppliers', { name: 'Tortilleria Central' });
+    expect(duplicate.status).toBe(409);
+
+    const forbiddenCreate = await call(limitedCookie, 'POST', '/api/v1/suppliers', { name: 'Sin permiso' });
+    expect(forbiddenCreate.status).toBe(403);
+    const forbiddenList = await call(limitedCookie, 'GET', '/api/v1/suppliers');
+    expect(forbiddenList.status).toBe(403);
+  });
+
+  it('crea una orden de compra y la consulta', async () => {
+    const masaIngredient = await call(adminCookie, 'POST', '/api/v1/ingredients', { name: 'Masa compra', sku: 'PRUEBA-COMPRA', baseUnitId: kgUnitId });
+    expect(masaIngredient.status).toBe(201);
+    ingredientId = masaIngredient.json.data.id;
+
+    const key = `po-${crypto.randomUUID()}`;
+    const body = {
+      branchId: env.branchId, supplierId, idempotencyKey: key,
+      items: [{ ingredientId, quantity: '5', unitId: kgUnitId, unitPrice: 12.5 }],
+    };
+    const po = await call(adminCookie, 'POST', '/api/v1/purchase-orders', body);
+    expect(po.status).toBe(201);
+    expect(Number(po.json.data.folio)).toBeGreaterThan(0);
+    poId = po.json.data.id;
+
+    const retry = await call(adminCookie, 'POST', '/api/v1/purchase-orders', body);
+    expect(retry.status).toBe(200);
+    expect(retry.json.idempotent).toBe(true);
+
+    const detail = await call(adminCookie, 'GET', `/api/v1/purchase-orders/${poId}`);
+    expect(detail.status).toBe(200);
+    expect(detail.json.data.supplier_name).toBe('Tortilleria Central');
+    expect(detail.json.data.items).toHaveLength(1);
+    expect(Number(detail.json.data.items[0].quantity)).toBe(5);
+    expect(Number(detail.json.data.items[0].received_quantity)).toBe(0);
+  });
+
+  it('registra una recepcion parcial que actualiza existencias y costos', async () => {
+    const receive = await call(adminCookie, 'POST', `/api/v1/purchase-orders/${poId}/receive`, {
+      warehouseId, idempotencyKey: `recv-${crypto.randomUUID()}`,
+      items: [{ ingredientId, quantityReceived: '2' }],
+    });
+    expect(receive.status).toBe(201);
+    expect(receive.json.status).toBe('PARTIALLY_RECEIVED');
+
+    const balances = await call(adminCookie, 'GET', `/api/v1/inventory/balances?branchId=${env.branchId}`);
+    expect(balanceOf(balances.json.data, ingredientId, warehouseId)).toBeCloseTo(2, 5);
+
+    const cost = await pool.query('SELECT unit_price FROM ingredient_costs WHERE company_id=$1 AND ingredient_id=$2 ORDER BY occurred_at DESC LIMIT 1', [env.companyId, ingredientId]);
+    expect(Number(cost.rows[0].unit_price)).toBe(12.5);
+  });
+
+  it('completa la recepcion y rechaza excesos y reposiciones', async () => {
+    const over = await call(adminCookie, 'POST', `/api/v1/purchase-orders/${poId}/receive`, {
+      warehouseId, idempotencyKey: `recv-${crypto.randomUUID()}`,
+      items: [{ ingredientId, quantityReceived: '4' }],
+    });
+    expect(over.status).toBe(409);
+
+    const finish = await call(adminCookie, 'POST', `/api/v1/purchase-orders/${poId}/receive`, {
+      warehouseId, idempotencyKey: `recv-${crypto.randomUUID()}`,
+      items: [{ ingredientId, quantityReceived: '3' }],
+    });
+    expect(finish.status).toBe(201);
+    expect(finish.json.status).toBe('RECEIVED');
+
+    const extra = await call(adminCookie, 'POST', `/api/v1/purchase-orders/${poId}/receive`, {
+      warehouseId, idempotencyKey: `recv-${crypto.randomUUID()}`,
+      items: [{ ingredientId, quantityReceived: '1' }],
+    });
+    expect(extra.status).toBe(409);
+
+    const balances = await call(adminCookie, 'GET', `/api/v1/inventory/balances?branchId=${env.branchId}`);
+    expect(balanceOf(balances.json.data, ingredientId, warehouseId)).toBeCloseTo(5, 5);
+  });
+
+  it('aplica conversiones de unidad en la recepcion de forma idempotente', async () => {
+    const salsa = await call(adminCookie, 'POST', '/api/v1/ingredients', { name: 'Salsa compra', sku: 'PRUEBA-COMPRA-SALSA', baseUnitId: kgUnitId });
+    expect(salsa.status).toBe(201);
+    salsaId = salsa.json.data.id;
+    await call(adminCookie, 'POST', '/api/v1/unit-conversions', { fromUnitId: kgUnitId, toUnitId: gUnitId, factor: 1000 });
+
+    const po = await call(adminCookie, 'POST', '/api/v1/purchase-orders', {
+      branchId: env.branchId, supplierId, idempotencyKey: `po-salsa-${crypto.randomUUID()}`,
+      items: [{ ingredientId: salsaId, quantity: '1500', unitId: gUnitId, unitPrice: 0.4 }],
+    });
+    expect(po.status).toBe(201);
+
+    const receiveKey = `recv-salsa-${crypto.randomUUID()}`;
+    const body = { warehouseId, idempotencyKey: receiveKey, items: [{ ingredientId: salsaId, quantityReceived: '1500' }] };
+    const receive = await call(adminCookie, 'POST', `/api/v1/purchase-orders/${po.json.data.id}/receive`, body);
+    expect(receive.status).toBe(201);
+    expect(receive.json.status).toBe('RECEIVED');
+    expect(receive.json.idempotent).toBe(false);
+
+    const retry = await call(adminCookie, 'POST', `/api/v1/purchase-orders/${po.json.data.id}/receive`, body);
+    expect(retry.status).toBe(200);
+    expect(retry.json.idempotent).toBe(true);
+
+    const balances = await call(adminCookie, 'GET', `/api/v1/inventory/balances?branchId=${env.branchId}`);
+    expect(balanceOf(balances.json.data, salsaId, warehouseId)).toBeCloseTo(1.5, 5);
+
+    const movements = await call(adminCookie, 'GET', `/api/v1/inventory/movements?branchId=${env.branchId}&ingredientId=${salsaId}`);
+    const purchase = movements.json.data.filter((m: any) => m.movement_type === 'PURCHASE');
+    expect(purchase).toHaveLength(1);
+    expect(Number(purchase[0].quantity)).toBeCloseTo(1500, 5);
+    expect(purchase[0].unit_code).toBe('G');
+  });
+});

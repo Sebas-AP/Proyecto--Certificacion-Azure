@@ -53,6 +53,22 @@ export async function addMovement(client: { query: (text: string, values?: unkno
   return movement.rows[0];
 }
 
+export async function conversionFactor(client: { query: (text: string, values?: unknown[]) => Promise<{ rowCount: number; rows: any[] }> }, companyId: string, fromUnitId: string, toUnitId: string): Promise<string | null> {
+  const direct = await client.query(
+    `SELECT factor FROM unit_conversions WHERE from_unit_id=$1 AND to_unit_id=$2 AND (company_id=$3 OR company_id IS NULL)
+     ORDER BY company_id IS NOT NULL LIMIT 1`,
+    [fromUnitId, toUnitId, companyId],
+  );
+  if (direct.rowCount === 1) return String(direct.rows[0].factor);
+  const inverse = await client.query(
+    `SELECT factor FROM unit_conversions WHERE from_unit_id=$1 AND to_unit_id=$2 AND (company_id=$3 OR company_id IS NULL)
+     ORDER BY company_id IS NOT NULL LIMIT 1`,
+    [toUnitId, fromUnitId, companyId],
+  );
+  if (inverse.rowCount !== 1) return null;
+  return (1 / Number(inverse.rows[0].factor)).toFixed(8).replace(/0+$/, '').replace(/\.$/, '') || '0';
+}
+
 async function audit(client: { query: (text: string, values?: unknown[]) => Promise<unknown> }, user: User, branchId: string | null, entityType: string, entityId: string, action: string, reason?: string): Promise<void> {
   await client.query(`INSERT INTO audit_logs (company_id,branch_id,actor_id,entity_type,entity_id,action,reason)
     VALUES ($1,$2,$3,$4,$5,$6,$7)`, [user.company_id, branchId, user.id, entityType, entityId, action, reason ?? null]);

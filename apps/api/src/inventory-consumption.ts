@@ -1,4 +1,4 @@
-import { addMovement } from './inventory.js';
+import { addMovement, conversionFactor } from './inventory.js';
 import { convertQuantity } from './inventory-domain.js';
 
 type Client = { query: (text: string, values?: unknown[]) => Promise<{ rowCount: number; rows: any[] }> };
@@ -76,20 +76,4 @@ export async function applyTheoreticalConsumption(client: Client, input: {
     consumed += 1;
   }
   return consumed;
-}
-
-async function conversionFactor(client: Client, companyId: string, fromUnitId: string, toUnitId: string): Promise<string | null> {
-  const direct = await client.query(
-    `SELECT factor FROM unit_conversions WHERE from_unit_id=$1 AND to_unit_id=$2 AND (company_id=$3 OR company_id IS NULL)
-     ORDER BY company_id IS NOT NULL LIMIT 1`,
-    [fromUnitId, toUnitId, companyId],
-  );
-  if (direct.rowCount === 1) return String(direct.rows[0].factor);
-  const inverse = await client.query(
-    `SELECT factor FROM unit_conversions WHERE from_unit_id=$1 AND to_unit_id=$2 AND (company_id=$3 OR company_id IS NULL)
-     ORDER BY company_id IS NOT NULL LIMIT 1`,
-    [toUnitId, fromUnitId, companyId],
-  );
-  if (inverse.rowCount !== 1) return null;
-  return trimmed(1 / Number(inverse.rows[0].factor));
 }

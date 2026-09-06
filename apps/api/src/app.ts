@@ -11,6 +11,7 @@ import { registerKitchenRoutes } from './kitchen.js';
 import { registerCashPaymentRoutes } from './cash-payments.js';
 import { registerReportRoutes } from './reports.js';
 import { registerInventoryRoutes } from './inventory.js';
+import { registerPurchasingRoutes } from './purchasing.js';
 
 export async function buildApp(options: { logger?: boolean } = {}): Promise<FastifyInstance> {
   const app = Fastify({ logger: options.logger ?? true });
@@ -139,6 +140,7 @@ export async function buildApp(options: { logger?: boolean } = {}): Promise<Fast
   await registerCashPaymentRoutes(app);
   await registerReportRoutes(app);
   await registerInventoryRoutes(app);
+  await registerPurchasingRoutes(app);
 
   app.setErrorHandler((error, _request, reply) => {
     app.log.error(error);

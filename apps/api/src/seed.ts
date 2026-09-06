@@ -225,6 +225,13 @@ try {
     }
   }
 
+  await client.query(
+    `INSERT INTO suppliers (company_id, name, tax_id, contact_name, phone, email)
+     VALUES ($1, 'Proveedor de demostracion', 'DOG920101AA1', 'Juan Demo', '555-0100', 'ventas@proveedor-demo.mx')
+     ON CONFLICT (company_id, name) DO NOTHING`,
+    [companyId],
+  );
+
   await client.query('COMMIT');
   console.log('Seed completado: admin@demo.local, catalogo demo, mesas, inventario y configuracion basica');
 } catch (error) {

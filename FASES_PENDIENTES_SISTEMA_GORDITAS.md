@@ -2,7 +2,7 @@
 
 ## Estado actual
 
-Implementado hasta el núcleo de la Fase 7:
+Implementado hasta el núcleo de la Fase 8:
 
 - Fase 0: estructura, PostgreSQL, migraciones y ejecución local.
 - Fase 1: empresa, sucursales, usuarios, roles, permisos, sesiones y auditoría.
@@ -11,9 +11,11 @@ Implementado hasta el núcleo de la Fase 7:
 - Fase 4: caja, pagos, movimientos y reembolsos.
 - Fase 5: reportes básicos, exportación CSV y salud operativa.
 - Estabilización inicial: CI, pruebas unitarias y health checks.
-- Correcciones técnicas: flujo E2E de pedidos resuelto (confirmar pedido con body vacío ya no devuelve 500; se añadió parser de JSON tolerante y pruebas de integración con PostgreSQL: 18 pruebas).
+- Correcciones técnicas: flujo E2E de pedidos resuelto (confirmar pedido con body vacío ya no devuelve 500; se añadió parser de JSON tolerante y pruebas de integración con PostgreSQL: 29 pruebas).
 - Fase 7 inicial: ingredientes, unidades, almacenes, existencias, movimientos, recetas versionadas, mermas y conteos.
 - Fase 7 UI: pestaña "Inventario" en la PWA con saldos, movimientos, ajustes/compra/mermas, conteos físicos, recetas con versiones y catálogo de ingredientes/almacenes.
+- Fase 7 consolidada: consumo teórico al completar venta, transferencias entre almacenes, conversiones de unidades y pruebas de concurrencia.
+- Fase 8 núcleo: proveedores, órdenes de compra, recepciones completas y parciales y costos históricos.
 
 ## Pendiente conocido
 
@@ -43,13 +45,22 @@ El flujo visual de creación y envío de pedidos reportaba errores intermitentes
 - [x] Pruebas de concurrencia en `tests/api.integration.test.ts` (24 pruebas): pagos concurrentes completan el pedido exactamente una vez; transferencias concurrentes no sobrepasan el origen; consumo idempotente y con saldo negativo; conversiones aplicadas.
 - [x] `tests/support.ts` limpia ahora `unit_conversions` por empresa y migra hasta `007`; `package.json` `db:migrate` incluye `007`.
 
+### Tras 2026-09-05 (Fase 8: compras y proveedores, núcleo backend)
+
+- [x] Migración `008_purchasing.sql`: `suppliers` (con `UNIQUE(company_id,name)` e índice por `tax_id`), `branch_purchase_sequences`, `purchase_orders` (folio por sucursal, estados `DRAFT`/`PARTIALLY_RECEIVED`/`RECEIVED`/`CANCELLED`, idempotencia por `(company,branch,idempotency_key)`), `purchase_order_items` (con `received_quantity` para diferencias), `purchase_receipts` (con `warehouse_id` y `idempotency_key` única), `purchase_receipt_items` e `ingredient_costs` (costos históricos `PURCHASE`/`ADJUSTMENT`). Permisos nuevos: `purchase.read`, `purchase.manage`, `purchase.receive`.
+- [x] Proveedores: `GET/POST /api/v1/suppliers` (creación con 409 ante duplicado).
+- [x] Órdenes de compra: `GET/POST /api/v1/purchase-orders` (lista con filtro de estado, detalle con ítems y recepciones) y `POST /api/v1/purchase-orders/:id/cancel` (solo en borrador). Al crear, si la unidad del ítem difiere de la unidad base exige una conversión definida (400 en caso contrario).
+- [x] Recepciones completas y parciales: `POST /api/v1/purchase-orders/:id/receive` con `warehouseId`, `idempotencyKey` y líneas `{ingredientId, quantityReceived}`. En la misma transacción crea la recepción, incrementa `received_quantity` por línea, registra movimientos `PURCHASE` (con `reference_id` de la recepción, cantidad en unidad del pedido y `signedDelta` en unidad base vía conversión), escribe asientos en `ingredient_costs` con el `unit_price` de la orden y avanza el estado a `PARTIALLY_RECEIVED`/`RECEIVED`. Rechaza con `409` recepcionar más de lo pedido, líneas ya completas u órdenes `RECEIVED`/`CANCELLED`; el reintento con la misma `idempotency_key` devuelve la recepción previa sin duplicar existencias.
+- [x] Pruebas de integración (29 en total): proveedor con control de permisos, orden idempotente, recepción parcial → existencias y costos históricos, sobre-recepción y reposición rechazadas (409), y recepción en unidad distinta (G) con conversión a base (KG) idempotente.
+- [x] `tests/support.ts` migra hasta `008` y limpia las tablas de compras; `package.json` `db:migrate` incluye `008`; el seed demo crea un proveedor de demostración.
+
 ### Pendiente inmediato
 
 1. Relacionar ingredientes con productos y variantes (receta ya opcionalmente liga productos).
 2. ~~Conectar una venta completada con consumo teórico~~ — hecho: consumo teórico al liquidar el pago, con saldo negativo permitido solo en ese tipo de movimiento.
-3. Añadir costos históricos por ingrediente y proveedor (lotes, compras por proveedor, método de costo).
+3. Costos históricos por ingrediente y proveedor: ya se registran en `ingredient_costs` al recibir; falta definir método de costo (promedio, PEPS) y mostrarlos en reportes/UI.
 4. ~~Añadir pruebas de concurrencia, transferencias entre almacenes y conversiones de unidades~~ — hecho: endpoints y pruebas de integración agregadas.
-5. Recepciones parciales de compra y devoluciones (requiere Fase 8).
+5. Recepciones parciales de compra: hechas en el núcleo de Fase 8; quedan devoluciones y diferencias de precio/precisión en la UI.
 
 ### Decisiones necesarias
 
@@ -66,22 +77,20 @@ El flujo visual de creación y envío de pedidos reportaba errores intermitentes
 
 ### Alcance
 
-- Proveedores.
-- Solicitudes y órdenes de compra.
-- Recepciones completas y parciales.
-- Diferencias entre pedido y recepción.
-- Costos históricos.
-- Devoluciones.
-- Documentos adjuntos.
-- Compras corporativas o por sucursal.
+- Proveedores: hecho (endpoints + seed demo).
+- Solicitudes y órdenes de compra: hecho el backend (creación, consulta, cancelación en borrador).
+- Recepciones completas y parciales: hecho el backend (con `idempotency_key`, estado `PARTIALLY_RECEIVED`/`RECEIVED` y movimientos `PURCHASE`).
+- Diferencias entre pedido y recepción: recibir más de lo pedido se rechaza con `409`; la diferencia (cantidad pendiente) queda en `received_quantity`.
+- Costos históricos: hecho el registro en `ingredient_costs` al recibir; falta método de costo y reportes con costos.
+- Devoluciones: pendiente.
+- Documentos adjuntos: pendiente.
+- Compras corporativas o por sucursal: órdenes por sucursal hechas; corporativas pendiente.
 
 ### Dependencias
 
-- Ingredientes y unidades estabilizados.
-- Almacenes configurados.
-- Proceso de autorización definido.
-- Datos reales de proveedores.
-- Política de costos aprobada.
+- Ingredientes y unidades estabilizados: cumplido (Fase 7).
+- Almacenes configurados: cumplido.
+- Proceso de autorización definido: pendiente si se quiere aprobación de órdenes (hoy solo borrador → recepción directa).
 
 ## Fase 9: piloto operativo formal
 
@@ -157,7 +166,7 @@ Toda recomendación debe ser revisable, desactivable y aprobada por una persona.
 ## Correcciones técnicas pendientes
 
 1. ~~Resolver el flujo E2E de pedidos desde la PWA~~ — resuelto: la confirmación de pedido se enviaba con `Content-Type: application/json` y cuerpo vacío, y Fastify devolvía 500 (`FST_ERR_CTP_EMPTY_JSON_BODY`). Se agregó parser de JSON tolerante en `apps/api/src/app.ts` (cuerpo vacío → `{}`, JSON inválido → 400) y se corrigió la PWA para no enviar `Content-Type` sin cuerpo.
-2. ~~Añadir pruebas de API con PostgreSQL para cada módulo crítico~~ — hechas en `tests/api.integration.test.ts` (24 pruebas) con esquema sembrado por corrida y limpieza autocorrectiva (`purgeTestEnvironments`/`cleanupTestEnvironment`). Cubren autenticación, catálogo, pedidos, cocina, caja, reportes, aislamiento de sucursal/permisos e inventario (incluidos consumo teórico, transferencias, conversiones y concurrencia).
+2. ~~Añadir pruebas de API con PostgreSQL para cada módulo crítico~~ — hechas en `tests/api.integration.test.ts` (29 pruebas) con esquema sembrado por corrida y limpieza autocorrectiva (`purgeTestEnvironments`/`cleanupTestEnvironment`). Cubren autenticación, catálogo, pedidos, cocina, caja, reportes, aislamiento de sucursal/permisos e inventario (incluidos consumo teórico, transferencias, conversiones, concurrencia y compras/proveedores).
 3. Añadir pruebas E2E con navegador.
 4. Reemplazar el bus SSE en memoria cuando existan réplicas.
 5. Agregar rate limiting y protección contra fuerza bruta.
@@ -174,7 +183,7 @@ Toda recomendación debe ser revisable, desactivable y aprobada por una persona.
 3. ~~Construir interfaz de inventario~~ — pestaña Inventario funcional (saldos, movimientos, ajustes, mermas, conteos, recetas, catálogo).
 4. ~~Completar pendientes de Fase 7~~ — consumo teórico al completar venta, transferencias entre almacenes, conversiones de unidades y pruebas de concurrencia ya implementados y probados.
 5. Completar recetas y conteos en producción (validar con datos reales).
-6. Incorporar compras y proveedores.
+6. ~~Incorporar compras y proveedores~~ — núcleo de Fase 8 implementado (proveedores, órdenes de compra, recepciones completas/parciales y costos históricos); falta UI de compras, devoluciones y diferencias de precio.
 7. Ejecutar piloto formal.
 8. Mejorar reportes con costos y mermas.
 9. Desplegar a más sucursales.
