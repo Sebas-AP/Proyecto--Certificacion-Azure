@@ -16,7 +16,7 @@
     "test": "vitest run",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:watch": "vitest",
-    "db:migrate": "psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f infrastructure/migrations/001_initial_core.sql -f infrastructure/migrations/002_catalog_orders.sql -f infrastructure/migrations/003_kitchen.sql -f infrastructure/migrations/004_cash_payments.sql -f infrastructure/migrations/005_reports_pilot.sql -f infrastructure/migrations/006_inventory.sql",
+    "db:migrate": "psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f infrastructure/migrations/001_initial_core.sql -f infrastructure/migrations/002_catalog_orders.sql -f infrastructure/migrations/003_kitchen.sql -f infrastructure/migrations/004_cash_payments.sql -f infrastructure/migrations/005_reports_pilot.sql -f infrastructure/migrations/006_inventory.sql -f infrastructure/migrations/007_inventory_consumption.sql",
     "db:seed": "tsx apps/api/src/seed.ts"
   },
   "dependencies": {

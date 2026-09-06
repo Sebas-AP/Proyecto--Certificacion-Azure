@@ -155,19 +155,23 @@ Permisos: una consulta con `branchId` requiere `report.branch.read`; una consult
 
 ## Fase 6: inventario y recetas (backend)
 
-La migración `006_inventory.sql` es repetible y crea unidades, conversiones, ingredientes, almacenes, existencias, movimientos inmutables, recetas versionadas, mermas y conteos. Las existencias usan `NUMERIC(20,8)` y las modificaciones bloquean el balance con `SELECT FOR UPDATE`; por defecto una operación que produciría negativo responde `409`.
+La migración `006_inventory.sql` es repetible y crea unidades, conversiones, ingredientes, almacenes, existencias, movimientos inmutables, recetas versionadas, mermas y conteos. Las existencias usan `NUMERIC(20,8)` y las modificaciones bloquean el balance con `SELECT FOR UPDATE`. La migración `007_inventory_consumption.sql` agrega `idempotency_key` a los movimientos y permite balance negativo **solo** para consumo teórico; el resto de operaciones responde `409` ante negativo.
 
 Endpoints autenticados:
 
 - `GET /api/v1/units` lista unidades globales y de la empresa para formularios.
+- `GET/POST /api/v1/unit-conversions` define factores de conversión por empresa (`factor` = unidades destino por unidad origen; p. ej. KG→G = 1000).
 - `GET/POST /api/v1/ingredients` y `GET/POST /api/v1/warehouses`.
 - `GET /api/v1/inventory/balances?branchId=...` y `GET /api/v1/inventory/movements?branchId=...&ingredientId=...`. Los balances hacen left join con ingredientes para mostrar existencias en cero.
 - `POST /api/v1/inventory/adjustments` con `type`, `quantity`, `unitId` y motivo obligatorio; `POST /api/v1/inventory/waste` registra merma y movimiento.
+- `POST /api/v1/inventory/transfers` mueve existencia entre dos almacenes de la misma sucursal de forma atómica (par `TRANSFER_OUT`/`TRANSFER_IN` con `reference_id` compartido), es idempotente por `idempotencyKey` y rechaza con `409` si el origen no tiene saldo.
 - `GET/POST /api/v1/recipes` y `POST /api/v1/recipes/:id/versions`, que nunca sobrescribe versiones existentes.
 - `GET /api/v1/recipe-versions/:id` devuelve una versión con sus ingredientes (para consulta visual).
 - `POST /api/v1/inventory/counts` y `POST /api/v1/inventory/counts/:id/result`.
 
-Permisos: `inventory.read`, `inventory.manage`, `inventory.adjust`, `recipe.read` y `recipe.manage`. Los ajustes, mermas, cambios de receta y conteos generan auditoría. El consumo teórico no se conecta todavía con ventas ni pedidos; queda como tarea posterior para no modificar el flujo actual de pedidos.
+Permisos: `inventory.read`, `inventory.manage`, `inventory.adjust`, `recipe.read` y `recipe.manage`. Los ajustes, mermas, cambios de receta, transferencias y conteos generan auditoría.
+
+**Consumo teórico al completar venta**: cuando un pago liquida el total de un pedido (estado `COMPLETED`), se descuentan los ingredientes de la receta vigente de cada producto vendido como movimientos `THEORETICAL_CONSUMPTION` (se toma el primer almacén activo de la sucursal; sin receta o sin almacén no se descuenta y no se bloquea la venta). Si la unidad de la receta difiere de la unidad base del ingrediente se aplica la conversión de `unit-conversions`; sin conversión definida se omite esa línea. El saldo puede quedar negativo solo con consumos teóricos; los demás movimientos siguen bloqueando con `409`.
 
 ## Fase 7: interfaz de inventario (PWA)
 
@@ -179,4 +183,4 @@ La pestaña `Inventario` se autentica con la misma sesión y agrupa cinco subvis
 - **Recetas**: crea recetas con lista de ingredientes y abre nuevas versiones sin sobrescribir las anteriores; el detalle de una versión se consulta con `GET /api/v1/recipe-versions/:id`.
 - **Catálogo**: alta y listado de ingredientes (con unidad base) y almacenes de la sucursal activa.
 
-Los permisos degradan la interfaz de forma natural: un rol sin `inventory.*` o `recipe.*` verá los errores `403` de la API. Los datos demo se cargan con `npm run db:seed` (ver apartado de seed) y se limpiaron las empresas demo duplicadas de corridas previas.
+Los consumos teóricos de las ventas completadas y las transferencias entre almacenes aparecen en el histórico de **Movimientos**. Los permisos degradan la interfaz de forma natural: un rol sin `inventory.*` o `recipe.*` verá los errores `403` de la API. Los datos demo se cargan con `npm run db:seed` (ver apartado de seed) y se limpiaron las empresas demo duplicadas de corridas previas.

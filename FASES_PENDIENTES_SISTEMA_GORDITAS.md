@@ -33,18 +33,28 @@ El flujo visual de creación y envío de pedidos reportaba errores intermitentes
 - [x] Balances muestran ingredientes sin existencias en cero (`GET /api/v1/inventory/balances` hace left join).
 - [x] Seed demo idempotente con 4 ingredientes, almacén, compra inicial y receta v1 con 4 ingredientes; se eliminaron empresas demo duplicadas.
 
+### Tras 2026-09-05 (pendientes de Fase 7: consumo, transferencias, conversiones y concurrencia)
+
+- [x] Migración `007_inventory_consumption.sql`: se quitó el `CHECK (quantity >= 0)` de `stock_balances` y se agregó `idempotency_key` a `stock_movements` con índice único por par `(idempotency_key, movement_type)`.
+- [x] Consumo teórico al completar venta: cuando un pago liquida el pedido (`status=COMPLETED`), se descuentan los ingredientes de la receta vigente del producto vendido como movimientos `THEORETICAL_CONSUMPTION` (en `apps/api/src/inventory-consumption.ts`, disparado desde `cash-payments.ts`). Toma el primer almacén activo de la sucursal; sin receta o sin almacén no se descuenta (no bloquea la venta).
+- [x] Decisión resuelta: inventario negativo permitido **solo** para `THEORETICAL_CONSUMPTION`; el resto de movimientos sigue bloqueando con `409`.
+- [x] Conversiones de unidades: `GET/POST /api/v1/unit-conversions` (factor = unidades destino por unidad origen; por empresa o globales). Se aplican en el consumo teórico cuando la unidad de la receta difiere de la unidad base del ingrediente; sin conversión definida se omite esa línea sin bloquear.
+- [x] Transferencias entre almacenes: `POST /api/v1/inventory/transfers` atómico, con par `TRANSFER_OUT`/`TRANSFER_IN`, `reference_id` compartido y `idempotency_key` para reintentos; valida misma sucursal y almacenes activos; rechaza origen insuficiente con `409`.
+- [x] Pruebas de concurrencia en `tests/api.integration.test.ts` (24 pruebas): pagos concurrentes completan el pedido exactamente una vez; transferencias concurrentes no sobrepasan el origen; consumo idempotente y con saldo negativo; conversiones aplicadas.
+- [x] `tests/support.ts` limpia ahora `unit_conversions` por empresa y migra hasta `007`; `package.json` `db:migrate` incluye `007`.
+
 ### Pendiente inmediato
 
 1. Relacionar ingredientes con productos y variantes (receta ya opcionalmente liga productos).
-2. Conectar una venta completada con consumo teórico solo después de estabilizar pedidos y pagos.
+2. ~~Conectar una venta completada con consumo teórico~~ — hecho: consumo teórico al liquidar el pago, con saldo negativo permitido solo en ese tipo de movimiento.
 3. Añadir costos históricos por ingrediente y proveedor (lotes, compras por proveedor, método de costo).
-4. Añadir pruebas de concurrencia, transferencias entre almacenes y conversiones de unidades.
+4. ~~Añadir pruebas de concurrencia, transferencias entre almacenes y conversiones de unidades~~ — hecho: endpoints y pruebas de integración agregadas.
 5. Recepciones parciales de compra y devoluciones (requiere Fase 8).
 
 ### Decisiones necesarias
 
-- Unidades oficiales y conversiones permitidas.
-- Si el inventario negativo se bloquea siempre o solo genera alerta.
+- Unidades oficiales y conversiones permitidas (por ahora se definen por empresa vía `unit-conversions`).
+- ~~Si el inventario negativo se bloquea siempre o solo genera alerta~~ — resuelto: se permite negativo solo en consumo teórico (`THEORETICAL_CONSUMPTION`); el resto bloquea con `409`.
 - Frecuencia de conteos físicos.
 - Quién puede ajustar existencias.
 - Cómo se manejan lotes, caducidades y productos perecederos.
@@ -147,7 +157,7 @@ Toda recomendación debe ser revisable, desactivable y aprobada por una persona.
 ## Correcciones técnicas pendientes
 
 1. ~~Resolver el flujo E2E de pedidos desde la PWA~~ — resuelto: la confirmación de pedido se enviaba con `Content-Type: application/json` y cuerpo vacío, y Fastify devolvía 500 (`FST_ERR_CTP_EMPTY_JSON_BODY`). Se agregó parser de JSON tolerante en `apps/api/src/app.ts` (cuerpo vacío → `{}`, JSON inválido → 400) y se corrigió la PWA para no enviar `Content-Type` sin cuerpo.
-2. ~~Añadir pruebas de API con PostgreSQL para cada módulo crítico~~ — hechas en `tests/api.integration.test.ts` (18 pruebas) con esquema sembrado por corrida y limpieza autocorrectiva (`purgeTestEnvironments`/`cleanupTestEnvironment`). Cubren autenticación, catálogo, pedidos, cocina, caja, reportes, aislamiento de sucursal/permisos e inventario.
+2. ~~Añadir pruebas de API con PostgreSQL para cada módulo crítico~~ — hechas en `tests/api.integration.test.ts` (24 pruebas) con esquema sembrado por corrida y limpieza autocorrectiva (`purgeTestEnvironments`/`cleanupTestEnvironment`). Cubren autenticación, catálogo, pedidos, cocina, caja, reportes, aislamiento de sucursal/permisos e inventario (incluidos consumo teórico, transferencias, conversiones y concurrencia).
 3. Añadir pruebas E2E con navegador.
 4. Reemplazar el bus SSE en memoria cuando existan réplicas.
 5. Agregar rate limiting y protección contra fuerza bruta.
@@ -162,13 +172,14 @@ Toda recomendación debe ser revisable, desactivable y aprobada por una persona.
 1. ~~Resolver y probar pedidos E2E~~ — resuelto a nivel API; añadir prueba E2E con navegador.
 2. ~~Añadir pruebas de caja y pedidos con base real~~ — cubiertas en la suite de integración.
 3. ~~Construir interfaz de inventario~~ — pestaña Inventario funcional (saldos, movimientos, ajustes, mermas, conteos, recetas, catálogo).
-4. Completar recetas y conteos en producción (validar con datos reales).
-5. Incorporar compras y proveedores.
-6. Ejecutar piloto formal.
-7. Mejorar reportes con costos y mermas.
-8. Desplegar a más sucursales.
-9. Implementar pedidos digitales.
-10. Evaluar IA con datos históricos.
+4. ~~Completar pendientes de Fase 7~~ — consumo teórico al completar venta, transferencias entre almacenes, conversiones de unidades y pruebas de concurrencia ya implementados y probados.
+5. Completar recetas y conteos en producción (validar con datos reales).
+6. Incorporar compras y proveedores.
+7. Ejecutar piloto formal.
+8. Mejorar reportes con costos y mermas.
+9. Desplegar a más sucursales.
+10. Implementar pedidos digitales.
+11. Evaluar IA con datos históricos.
 
 ## Regla de alcance
 

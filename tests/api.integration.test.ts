@@ -352,3 +352,209 @@ describe('inventario', () => {
     expect(foreignDetail.status).toBe(404);
   });
 });
+
+describe('consumo teorico en ventas', () => {
+  let kgUnitId: string;
+  let consWarehouseId: string;
+  let masaId: string;
+
+  beforeAll(async () => {
+    const kg = await pool.query(`SELECT id FROM units WHERE code='KG' LIMIT 1`);
+    kgUnitId = kg.rows[0].id;
+    const warehouse = await pool.query(`SELECT id FROM warehouses WHERE company_id=$1 AND branch_id=$2 AND is_active ORDER BY name LIMIT 1`, [env.companyId, env.branchId]);
+    consWarehouseId = warehouse.rows[0].id;
+  });
+
+  async function createInventoryProduct(name: string, sku: string, price: number): Promise<{ productId: string; variantId: string }> {
+    const created = await call(adminCookie, 'POST', '/api/v1/products', { categoryId: env.categoryId, name, sku, variants: [{ name: 'Unica', price, isDefault: true }] });
+    expect(created.status).toBe(201);
+    const variant = await pool.query(`SELECT id FROM product_variants WHERE product_id=$1 AND is_default LIMIT 1`, [created.json.data.id]);
+    return { productId: created.json.data.id, variantId: variant.rows[0].id };
+  }
+
+  async function sell(productId: string, variantId: string, amount: number): Promise<{ id: string; status: number }> {
+    const key = `consumo-${crypto.randomUUID()}`;
+    const created = await call(adminCookie, 'POST', '/api/v1/orders', { branchId: env.branchId, tableId: env.tableId, channel: 'DINE_IN', idempotencyKey: key });
+    const id = created.json.data.id;
+    await call(adminCookie, 'POST', `/api/v1/orders/${id}/items`, { productId, variantId, quantity: 1 });
+    await call(adminCookie, 'POST', `/api/v1/orders/${id}/confirm`, {});
+    const payment = await call(adminCookie, 'POST', `/api/v1/orders/${id}/payments`, { method: 'CASH', amount, cashReceived: amount, idempotencyKey: `pago-${crypto.randomUUID()}` });
+    return { id, status: payment.status };
+  }
+
+  function balanceOf(rows: any[], ingredientId: string, warehouseId: string) {
+    return Number(rows.find((b: any) => b.ingredient_id === ingredientId && b.warehouse_id === warehouseId).quantity);
+  }
+
+  it('descuenta el consumo teorico al completar la venta', async () => {
+    const ingredient = await call(adminCookie, 'POST', '/api/v1/ingredients', { name: 'Masa de venta', sku: 'PRUEBA-MASA-VENTA', baseUnitId: kgUnitId });
+    expect(ingredient.status).toBe(201);
+    masaId = ingredient.json.data.id;
+
+    const recipe = await call(adminCookie, 'POST', '/api/v1/recipes', { name: 'Gordita de venta', productId: env.productId, items: [{ ingredientId: masaId, quantity: '0.1', unitId: kgUnitId }] });
+    expect(recipe.status).toBe(201);
+
+    const purchase = await call(adminCookie, 'POST', '/api/v1/inventory/adjustments', { branchId: env.branchId, warehouseId: consWarehouseId, ingredientId: masaId, quantity: '10', unitId: kgUnitId, type: 'PURCHASE', reason: 'Stock para venta' });
+    expect(purchase.status).toBe(201);
+
+    const opened = await call(adminCookie, 'POST', `/api/v1/branches/${env.branchId}/cash-sessions/open`, { openingCash: 1000 });
+    expect(opened.status).toBe(201);
+
+    const sale = await sell(env.productId, env.variantId, 35);
+    expect(sale.status).toBe(201);
+
+    const balances = await call(adminCookie, 'GET', `/api/v1/inventory/balances?branchId=${env.branchId}`);
+    expect(balanceOf(balances.json.data, masaId, consWarehouseId)).toBeCloseTo(9.9, 5);
+
+    const movements = await call(adminCookie, 'GET', `/api/v1/inventory/movements?branchId=${env.branchId}&ingredientId=${masaId}`);
+    const consumed = movements.json.data.filter((m: any) => m.movement_type === 'THEORETICAL_CONSUMPTION' && m.reference_id === sale.id);
+    expect(consumed).toHaveLength(1);
+    expect(Number(consumed[0].quantity)).toBeCloseTo(0.1, 5);
+    expect(consumed[0].unit_code).toBe('KG');
+  });
+
+  it('permite saldo negativo solo en el consumo teorico', async () => {
+    const { productId, variantId } = await createInventoryProduct('Gordita deficit', 'PRUEBA-DEFICIT', 40);
+    const deficit = await call(adminCookie, 'POST', '/api/v1/ingredients', { name: 'Masa de deficit', sku: 'PRUEBA-DEFICIT-MASA', baseUnitId: kgUnitId });
+    expect(deficit.status).toBe(201);
+    const deficitId = deficit.json.data.id;
+    await call(adminCookie, 'POST', '/api/v1/recipes', { name: 'Receta deficit', productId, items: [{ ingredientId: deficitId, quantity: '0.1', unitId: kgUnitId }] });
+    await call(adminCookie, 'POST', '/api/v1/inventory/adjustments', { branchId: env.branchId, warehouseId: consWarehouseId, ingredientId: deficitId, quantity: '0.04', unitId: kgUnitId, type: 'PURCHASE', reason: 'Stock insuficiente' });
+
+    const first = await sell(productId, variantId, 40);
+    const second = await sell(productId, variantId, 40);
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+
+    const balances = await call(adminCookie, 'GET', `/api/v1/inventory/balances?branchId=${env.branchId}`);
+    expect(balanceOf(balances.json.data, deficitId, consWarehouseId)).toBeCloseTo(-0.16, 5);
+
+    const blocked = await call(adminCookie, 'POST', '/api/v1/inventory/adjustments', { branchId: env.branchId, warehouseId: consWarehouseId, ingredientId: deficitId, quantity: '1', unitId: kgUnitId, type: 'NEGATIVE_ADJUSTMENT', reason: 'Intento de dejar negativo' });
+    expect(blocked.status).toBe(409);
+  });
+
+  it('aplica conversiones de unidades en el consumo teorico', async () => {
+    const gUnit = await pool.query(`SELECT id FROM units WHERE code='G' LIMIT 1`);
+    const gUnitId = gUnit.rows[0].id;
+
+    const conversion = await call(adminCookie, 'POST', '/api/v1/unit-conversions', { fromUnitId: kgUnitId, toUnitId: gUnitId, factor: 1000 });
+    expect(conversion.status).toBe(201);
+    const duplicate = await call(adminCookie, 'POST', '/api/v1/unit-conversions', { fromUnitId: kgUnitId, toUnitId: gUnitId, factor: 1000 });
+    expect(duplicate.status).toBe(409);
+
+    const listed = await call(adminCookie, 'GET', '/api/v1/unit-conversions');
+    expect(listed.status).toBe(200);
+    const entry = listed.json.data.find((c: any) => c.from_unit_code === 'KG' && c.to_unit_code === 'G');
+    expect(Number(entry.factor)).toBe(1000);
+
+    const { productId, variantId } = await createInventoryProduct('Gordita salsa', 'PRUEBA-SALSA', 30);
+    const salsa = await call(adminCookie, 'POST', '/api/v1/ingredients', { name: 'Salsa de venta', sku: 'PRUEBA-SALSA-ING', baseUnitId: kgUnitId });
+    expect(salsa.status).toBe(201);
+    const salsaId = salsa.json.data.id;
+    await call(adminCookie, 'POST', '/api/v1/recipes', { name: 'Receta salsa', productId, items: [{ ingredientId: salsaId, quantity: '150', unitId: gUnitId }] });
+    await call(adminCookie, 'POST', '/api/v1/inventory/adjustments', { branchId: env.branchId, warehouseId: consWarehouseId, ingredientId: salsaId, quantity: '1', unitId: kgUnitId, type: 'PURCHASE', reason: 'Stock de salsa' });
+
+    const sale = await sell(productId, variantId, 30);
+    expect(sale.status).toBe(201);
+
+    const balances = await call(adminCookie, 'GET', `/api/v1/inventory/balances?branchId=${env.branchId}`);
+    expect(balanceOf(balances.json.data, salsaId, consWarehouseId)).toBeCloseTo(0.85, 5);
+
+    const movements = await call(adminCookie, 'GET', `/api/v1/inventory/movements?branchId=${env.branchId}&ingredientId=${salsaId}`);
+    const consumed = movements.json.data.filter((m: any) => m.movement_type === 'THEORETICAL_CONSUMPTION' && m.reference_id === sale.id);
+    expect(consumed).toHaveLength(1);
+    expect(Number(consumed[0].quantity)).toBeCloseTo(150, 5);
+    expect(consumed[0].unit_code).toBe('G');
+  });
+});
+
+describe('transferencias y concurrencia de inventario', () => {
+  let kgUnitId: string;
+  let originId: string;
+  let destId: string;
+
+  beforeAll(async () => {
+    const kg = await pool.query(`SELECT id FROM units WHERE code='KG' LIMIT 1`);
+    kgUnitId = kg.rows[0].id;
+    const origin = await pool.query(`SELECT id FROM warehouses WHERE company_id=$1 AND branch_id=$2 AND is_active ORDER BY name LIMIT 1`, [env.companyId, env.branchId]);
+    originId = origin.rows[0].id;
+    const dest = await call(adminCookie, 'POST', '/api/v1/warehouses', { branchId: env.branchId, name: 'Almacen de traspasos' });
+    expect(dest.status).toBe(201);
+    destId = dest.json.data.id;
+  });
+
+  function balanceOf(rows: any[], ingredientId: string, warehouseId: string) {
+    return Number(rows.find((b: any) => b.ingredient_id === ingredientId && b.warehouse_id === warehouseId).quantity);
+  }
+
+  it('transfiere entre almacenes de forma atomica e idempotente', async () => {
+    const ingredient = await call(adminCookie, 'POST', '/api/v1/ingredients', { name: 'Masa traslado', sku: 'PRUEBA-TRASLADO', baseUnitId: kgUnitId });
+    expect(ingredient.status).toBe(201);
+    const ingredientId = ingredient.json.data.id;
+    await call(adminCookie, 'POST', '/api/v1/inventory/adjustments', { branchId: env.branchId, warehouseId: originId, ingredientId, quantity: '5', unitId: kgUnitId, type: 'PURCHASE', reason: 'Stock para traslado' });
+
+    const key = `transferencia-${crypto.randomUUID()}`;
+    const transfer = await call(adminCookie, 'POST', '/api/v1/inventory/transfers', { branchId: env.branchId, fromWarehouseId: originId, toWarehouseId: destId, ingredientId, quantity: '2', unitId: kgUnitId, reason: 'Traspaso de prueba', idempotencyKey: key });
+    expect(transfer.status).toBe(201);
+    const pair = transfer.json.data;
+    expect(pair.transfer_out.reference_id).toBe(pair.transfer_in.reference_id);
+    expect(pair.transfer_out.movement_type).toBe('TRANSFER_OUT');
+    expect(pair.transfer_in.movement_type).toBe('TRANSFER_IN');
+
+    let balances = await call(adminCookie, 'GET', `/api/v1/inventory/balances?branchId=${env.branchId}`);
+    expect(balanceOf(balances.json.data, ingredientId, originId)).toBeCloseTo(3, 5);
+    expect(balanceOf(balances.json.data, ingredientId, destId)).toBeCloseTo(2, 5);
+
+    const retry = await call(adminCookie, 'POST', '/api/v1/inventory/transfers', { branchId: env.branchId, fromWarehouseId: originId, toWarehouseId: destId, ingredientId, quantity: '2', unitId: kgUnitId, reason: 'Traspaso de prueba', idempotencyKey: key });
+    expect(retry.status).toBe(200);
+    expect(retry.json.idempotent).toBe(true);
+
+    balances = await call(adminCookie, 'GET', `/api/v1/inventory/balances?branchId=${env.branchId}`);
+    expect(balanceOf(balances.json.data, ingredientId, originId)).toBeCloseTo(3, 5);
+    expect(balanceOf(balances.json.data, ingredientId, destId)).toBeCloseTo(2, 5);
+
+    const blocked = await call(adminCookie, 'POST', '/api/v1/inventory/transfers', { branchId: env.branchId, fromWarehouseId: originId, toWarehouseId: destId, ingredientId, quantity: '999', unitId: kgUnitId, reason: 'Traspaso excesivo', idempotencyKey: `transferencia-${crypto.randomUUID()}` });
+    expect(blocked.status).toBe(409);
+  });
+
+  it('serializa transferencias concurrentes sin sobrepasar el origen', async () => {
+    const ingredient = await call(adminCookie, 'POST', '/api/v1/ingredients', { name: 'Masa concurrente', sku: 'PRUEBA-CONCURRENTE', baseUnitId: kgUnitId });
+    expect(ingredient.status).toBe(201);
+    const ingredientId = ingredient.json.data.id;
+    await call(adminCookie, 'POST', '/api/v1/inventory/adjustments', { branchId: env.branchId, warehouseId: originId, ingredientId, quantity: '3', unitId: kgUnitId, type: 'PURCHASE', reason: 'Stock concurrente' });
+
+    const body = { branchId: env.branchId, fromWarehouseId: originId, toWarehouseId: destId, ingredientId, quantity: '2', unitId: kgUnitId, reason: 'Traspaso concurrente' };
+    const [first, second] = await Promise.all([
+      call(adminCookie, 'POST', '/api/v1/inventory/transfers', { ...body, idempotencyKey: `concurrente-${crypto.randomUUID()}` }),
+      call(adminCookie, 'POST', '/api/v1/inventory/transfers', { ...body, idempotencyKey: `concurrente-${crypto.randomUUID()}` }),
+    ]);
+    expect([first.status, second.status].sort()).toEqual([201, 409]);
+
+    const balances = await call(adminCookie, 'GET', `/api/v1/inventory/balances?branchId=${env.branchId}`);
+    expect(balanceOf(balances.json.data, ingredientId, originId)).toBeCloseTo(1, 5);
+  });
+
+  it('completa el pedido exactamente una vez con pagos concurrentes', async () => {
+    const key = `orden-concurrente-${crypto.randomUUID()}`;
+    const created = await call(adminCookie, 'POST', '/api/v1/orders', { branchId: env.branchId, tableId: env.tableId, channel: 'DINE_IN', idempotencyKey: key });
+    const orderId = created.json.data.id;
+    await call(adminCookie, 'POST', `/api/v1/orders/${orderId}/items`, { productId: env.productId, variantId: env.variantId, quantity: 1 });
+    await call(adminCookie, 'POST', `/api/v1/orders/${orderId}/confirm`, {});
+
+    const [first, second] = await Promise.all([
+      call(adminCookie, 'POST', `/api/v1/orders/${orderId}/payments`, { method: 'CARD', amount: 35, idempotencyKey: `doble-${crypto.randomUUID()}` }),
+      call(adminCookie, 'POST', `/api/v1/orders/${orderId}/payments`, { method: 'CARD', amount: 35, idempotencyKey: `doble-${crypto.randomUUID()}` }),
+    ]);
+    expect([first.status, second.status].sort()).toEqual([201, 409]);
+
+    const order = await call(adminCookie, 'GET', `/api/v1/orders/${orderId}`);
+    expect(order.json.data.status).toBe('COMPLETED');
+
+    const payments = await call(adminCookie, 'GET', `/api/v1/orders/${orderId}/payments`);
+    expect(payments.json.data).toHaveLength(1);
+
+    const movements = await call(adminCookie, 'GET', `/api/v1/inventory/movements?branchId=${env.branchId}`);
+    const consumed = movements.json.data.filter((m: any) => m.movement_type === 'THEORETICAL_CONSUMPTION' && m.reference_id === orderId);
+    expect(consumed).toHaveLength(1);
+  });
+});

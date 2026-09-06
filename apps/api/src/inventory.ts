@@ -31,9 +31,9 @@ async function validWarehouse(client: { query: (text: string, values?: unknown[]
   return result.rowCount === 1;
 }
 
-async function addMovement(client: { query: (text: string, values?: unknown[]) => Promise<{ rowCount: number; rows: any[] }> }, input: {
+export async function addMovement(client: { query: (text: string, values?: unknown[]) => Promise<{ rowCount: number; rows: any[] }> }, input: {
   companyId: string; branchId: string; warehouseId: string; ingredientId: string; movementType: InventoryMovementType;
-  quantity: string; unitId: string; reason: string; actorId: string; referenceId?: string; signedDelta?: string;
+  quantity: string; unitId: string; reason: string; actorId: string; referenceId?: string; signedDelta?: string; allowNegative?: boolean; idempotencyKey?: string;
 }): Promise<any> {
   const ingredient = await client.query('SELECT id FROM ingredients WHERE id=$1 AND company_id=$2 AND is_active', [input.ingredientId, input.companyId]);
   if (ingredient.rowCount !== 1) throw Object.assign(new Error('Ingrediente no encontrado'), { statusCode: 404 });
@@ -44,12 +44,12 @@ async function addMovement(client: { query: (text: string, values?: unknown[]) =
   const balance = await client.query('SELECT id, quantity FROM stock_balances WHERE warehouse_id=$1 AND ingredient_id=$2 FOR UPDATE', [input.warehouseId, input.ingredientId]);
   if (balance.rowCount !== 1) throw Object.assign(new Error('Balance no encontrado'), { statusCode: 404 });
   const delta = input.signedDelta ?? movementDelta(input.movementType, input.quantity);
-  const next = resultingQuantity(String(balance.rows[0].quantity), delta);
+  const next = resultingQuantity(String(balance.rows[0].quantity), delta, input.allowNegative === true);
   await client.query('UPDATE stock_balances SET quantity=$1, updated_at=now() WHERE id=$2', [next, balance.rows[0].id]);
   const movement = await client.query(`INSERT INTO stock_movements
-    (company_id,branch_id,warehouse_id,ingredient_id,movement_type,quantity,unit_id,reason,reference_id,created_by)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
-  [input.companyId, input.branchId, input.warehouseId, input.ingredientId, input.movementType, input.quantity, input.unitId, input.reason, input.referenceId ?? null, input.actorId]);
+    (company_id,branch_id,warehouse_id,ingredient_id,movement_type,quantity,unit_id,reason,reference_id,idempotency_key,created_by)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+  [input.companyId, input.branchId, input.warehouseId, input.ingredientId, input.movementType, input.quantity, input.unitId, input.reason, input.referenceId ?? null, input.idempotencyKey ?? null, input.actorId]);
   return movement.rows[0];
 }
 
@@ -63,6 +63,24 @@ export async function registerInventoryRoutes(app: FastifyInstance): Promise<voi
     if (!(await permission(request, reply, 'inventory.read'))) return;
     const result = await pool.query('SELECT id,company_id,code,name,is_active FROM units WHERE is_active AND (company_id=$1 OR company_id IS NULL) ORDER BY company_id IS NOT NULL,code', [userOf(request).company_id]);
     return { data: result.rows };
+  });
+  app.get('/api/v1/unit-conversions', { preHandler: requireUser }, async (request, reply) => {
+    if (!(await permission(request, reply, 'inventory.read'))) return;
+    const result = await pool.query(`SELECT uc.id,uc.from_unit_id,fu.code from_unit_code,uc.to_unit_id,tu.code to_unit_code,uc.factor
+      FROM unit_conversions uc JOIN units fu ON fu.id=uc.from_unit_id JOIN units tu ON tu.id=uc.to_unit_id
+      WHERE uc.company_id=$1 OR uc.company_id IS NULL ORDER BY fu.code,tu.code`, [userOf(request).company_id]);
+    return { data: result.rows };
+  });
+  app.post('/api/v1/unit-conversions', { preHandler: requireUser }, async (request, reply) => {
+    if (!(await permission(request, reply, 'inventory.manage'))) return;
+    const input = z.object({ fromUnitId: uuid, toUnitId: uuid, factor: z.number().positive() }).safeParse(request.body);
+    if (!input.success || input.data.fromUnitId === input.data.toUnitId) return reply.code(400).send({ error: 'Conversion invalida' });
+    const units = await pool.query('SELECT id FROM units WHERE id=ANY($1::uuid[]) AND is_active', [[input.data.fromUnitId, input.data.toUnitId]]);
+    if (units.rowCount !== 2) return reply.code(400).send({ error: 'Unidad inexistente' });
+    try {
+      const result = await pool.query('INSERT INTO unit_conversions (company_id,from_unit_id,to_unit_id,factor) VALUES ($1,$2,$3,$4) RETURNING *', [userOf(request).company_id, input.data.fromUnitId, input.data.toUnitId, input.data.factor]);
+      return reply.code(201).send({ data: result.rows[0] });
+    } catch (error) { if ((error as { code?: string }).code === '23505') return reply.code(409).send({ error: 'La conversion ya existe' }); throw error; }
   });
   app.get('/api/v1/ingredients', { preHandler: requireUser }, async (request, reply) => {
     if (!(await permission(request, reply, 'inventory.read'))) return;
@@ -128,6 +146,39 @@ export async function registerInventoryRoutes(app: FastifyInstance): Promise<voi
       const waste = await client.query(`INSERT INTO waste_records (company_id,branch_id,warehouse_id,ingredient_id,quantity,unit_id,reason,movement_id,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`, [userOf(request).company_id, input.data.branchId, input.data.warehouseId, input.data.ingredientId, input.data.quantity, input.data.unitId, input.data.reason, movement.id, userOf(request).id]);
       await audit(client, userOf(request), input.data.branchId, 'waste_record', waste.rows[0].id, 'waste.created', input.data.reason); await client.query('COMMIT'); return reply.code(201).send({ data: waste.rows[0], movement });
     } catch (error) { await client.query('ROLLBACK'); if ((error as { statusCode?: number }).statusCode) return reply.code((error as { statusCode: number }).statusCode).send({ error: (error as Error).message }); if ((error as Error).message.includes('negativa')) return reply.code(409).send({ error: (error as Error).message }); throw error; } finally { client.release(); }
+  });
+  app.post('/api/v1/inventory/transfers', { preHandler: requireUser }, async (request, reply) => {
+    if (!(await permission(request, reply, 'inventory.adjust'))) return;
+    const input = z.object({ branchId: uuid, fromWarehouseId: uuid, toWarehouseId: uuid, ingredientId: uuid, quantity, unitId: uuid, reason: z.string().trim().min(1).max(500), idempotencyKey: z.string().trim().min(8).max(120) }).safeParse(request.body);
+    if (!input.success || !(await allowedBranch(request, input.success ? input.data.branchId : ''))) return reply.code(400).send({ error: 'Transferencia invalida' });
+    if (input.data.fromWarehouseId === input.data.toWarehouseId) return reply.code(400).send({ error: 'Los almacenes deben ser distintos' });
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const prior = await client.query(`SELECT id FROM stock_movements WHERE idempotency_key=$1 AND movement_type='TRANSFER_OUT'`, [input.data.idempotencyKey]);
+      if (prior.rowCount) {
+        const priorData = await client.query('SELECT * FROM stock_movements WHERE idempotency_key=$1 ORDER BY created_at', [input.data.idempotencyKey]);
+        await client.query('ROLLBACK');
+        return { data: priorData.rows, idempotent: true };
+      }
+      const from = await client.query('SELECT id FROM warehouses WHERE id=$1 AND company_id=$2 AND branch_id=$3 AND is_active', [input.data.fromWarehouseId, userOf(request).company_id, input.data.branchId]);
+      const to = await client.query('SELECT id FROM warehouses WHERE id=$1 AND company_id=$2 AND branch_id=$3 AND is_active', [input.data.toWarehouseId, userOf(request).company_id, input.data.branchId]);
+      if (from.rowCount !== 1 || to.rowCount !== 1) { await client.query('ROLLBACK'); return reply.code(400).send({ error: 'Almacen origen o destino invalido' }); }
+      const referenceId = crypto.randomUUID();
+      const transferOut = await addMovement(client, { companyId: userOf(request).company_id, branchId: input.data.branchId, warehouseId: input.data.fromWarehouseId, ingredientId: input.data.ingredientId, movementType: 'TRANSFER_OUT', quantity: input.data.quantity, unitId: input.data.unitId, reason: input.data.reason, actorId: userOf(request).id, referenceId, idempotencyKey: input.data.idempotencyKey });
+      const transferIn = await addMovement(client, { companyId: userOf(request).company_id, branchId: input.data.branchId, warehouseId: input.data.toWarehouseId, ingredientId: input.data.ingredientId, movementType: 'TRANSFER_IN', quantity: input.data.quantity, unitId: input.data.unitId, reason: input.data.reason, actorId: userOf(request).id, referenceId, idempotencyKey: input.data.idempotencyKey });
+      await client.query('COMMIT');
+      return reply.code(201).send({ data: { transfer_out: transferOut, transfer_in: transferIn }, idempotent: false });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      if ((error as { code?: string }).code === '23505') {
+        const prior = await pool.query('SELECT * FROM stock_movements WHERE idempotency_key=$1 ORDER BY created_at', [input.data.idempotencyKey]);
+        if (prior.rowCount) return { data: prior.rows, idempotent: true };
+      }
+      if ((error as { statusCode?: number }).statusCode) return reply.code((error as { statusCode: number }).statusCode).send({ error: (error as Error).message });
+      if ((error as Error).message.includes('negativa')) return reply.code(409).send({ error: (error as Error).message });
+      throw error;
+    } finally { client.release(); }
   });
   app.get('/api/v1/recipes', { preHandler: requireUser }, async (request, reply) => {
     if (!(await permission(request, reply, 'recipe.read'))) return;

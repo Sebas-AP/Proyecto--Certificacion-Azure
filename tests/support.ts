@@ -16,6 +16,7 @@ const MIGRATIONS = [
   '004_cash_payments.sql',
   '005_reports_pilot.sql',
   '006_inventory.sql',
+  '007_inventory_consumption.sql',
 ];
 
 export async function migrate(): Promise<void> {
@@ -136,6 +137,7 @@ async function deleteCompanyData(client: { query: (text: string, values?: unknow
   await client.query(`DELETE FROM branches WHERE company_id=$1`, [companyId]);
   await client.query(`DELETE FROM roles WHERE company_id=$1`, [companyId]);
   await client.query(`DELETE FROM payment_method_configs WHERE company_id=$1`, [companyId]);
+  await client.query(`DELETE FROM unit_conversions WHERE company_id=$1`, [companyId]);
   await client.query(`DELETE FROM companies WHERE id=$1`, [companyId]);
   await client.query(`ALTER TABLE stock_counts ENABLE TRIGGER stock_counts_immutable`);
   await client.query(`ALTER TABLE stock_movements ENABLE TRIGGER stock_movements_immutable`);

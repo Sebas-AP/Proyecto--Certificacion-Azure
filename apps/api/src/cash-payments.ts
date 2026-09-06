@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { requireUser, userHasPermission } from './auth.js';
 import { calculateChange, calculateExpectedCash, canCompleteOrder, money } from './cash-domain.js';
+import { applyTheoreticalConsumption } from './inventory-consumption.js';
 import { pool } from './db.js';
 
 type User = { id: string; company_id: string };
@@ -155,6 +156,7 @@ export async function registerCashPaymentRoutes(app: FastifyInstance): Promise<v
         updatedOrder = (await client.query(`UPDATE orders SET status='COMPLETED', updated_at=now() WHERE id=$1 RETURNING *`, [order.id])).rows[0];
         await client.query(`INSERT INTO order_events (order_id,event_type,from_status,to_status,actor_id) VALUES ($1,'COMPLETED',$2,'COMPLETED',$3)`, [order.id, order.status, user(request).id]);
         await audit(client, [user(request).company_id, order.branch_id, user(request).id, 'order', order.id, 'status.completed', JSON.stringify({ status: order.status }), JSON.stringify({ status: 'COMPLETED' }), 'Pago liquidado']);
+        await applyTheoreticalConsumption(client, { companyId: user(request).company_id, branchId: order.branch_id, orderId: order.id, orderFolio: order.folio, actorId: user(request).id });
       }
       await audit(client, [user(request).company_id, order.branch_id, user(request).id, 'payment', inserted.rows[0].id, 'payment.created', null, JSON.stringify(inserted.rows[0]), null]);
       await client.query('COMMIT');
