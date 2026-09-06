@@ -60,3 +60,41 @@ jobs:
         env:
           DATABASE_URL: postgresql://gorditas:gorditas@localhost:5432/gorditasos
         run: npm run db:migrate
+
+  integration:
+    name: API integration tests (PostgreSQL)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: gorditasos
+          POSTGRES_USER: gorditas
+          POSTGRES_PASSWORD: gorditas
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gorditas -d gorditasos"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://gorditas:gorditas@localhost:5432/gorditasos
+      SESSION_SECRET: secret-de-prueba-con-longitud-suficiente-para-ci
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run integration tests
+        run: npm run test:integration

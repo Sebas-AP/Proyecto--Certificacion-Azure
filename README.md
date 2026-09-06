@@ -15,9 +15,11 @@ Implementada la Fase 0 y el primer núcleo de la Fase 1:
 
 Fase 2 implementada: catálogo, mesas y pedidos. La primera interfaz operativa de Fase 3 vive en `apps/web`: meseros, sesión por cookie, pedidos enviados a cocina y una vista de cocina preparada para su contrato de tickets. Caja, pagos, inventario, mensajería e IA siguen fuera de alcance.
 
+El seed demo es idempotente. Con `SEED_ADMIN_PASSWORD` crea o actualiza la empresa `Empresa de demostracion`, la sucursal `Sucursal piloto` (`PILOTO`), el usuario `admin@demo.local` y su rol Administrador con todos los permisos disponibles. También crea la categoría `Gorditas`, tres productos demo con dos variantes y precios vigentes cada uno, disponibilidad en la sucursal, cuatro mesas disponibles, una caja principal, los métodos de pago efectivo, tarjeta y transferencia, y ahora inventario inicial: un almacén principal, cuatro ingredientes (masa, chicharrón, salsa y queso) con compra inicial, y la receta `Gordita de chicharron` v1. No crea pedidos, pagos, turnos ni otros datos históricos.
+
 Fase 4 implementada: sesiones de caja, pagos mixtos en efectivo/tarjeta/transferencia, cierres, idempotencia, movimientos manuales `IN/OUT`, solicitudes/aprobaciones de reembolso y consulta de pedidos pendientes. No se almacenan datos de tarjetas.
 
-Fase 5 piloto implementada: reportes básicos de ventas y operación, con filtros UTC explícitos, aislamiento por empresa/sucursales autorizadas y exportación CSV auditada. Inventario avanzado, compras, WhatsApp e IA siguen fuera de alcance.
+Fase 5 piloto implementada: reportes básicos de ventas y operación, con filtros UTC explícitos, aislamiento por empresa/sucursales autorizadas y exportación CSV auditada. La fase siguiente añade el núcleo backend de inventario y recetas; compras completas, WhatsApp e IA siguen fuera de alcance.
 
 ## Requisitos
 
@@ -65,7 +67,14 @@ GitHub Actions ejecuta CI en cada `push` y `pull request` con Node.js 22. El job
 principal instala dependencias con `npm ci`, ejecuta `npm run build:all` y
 `npm test`, usando la cache de npm. Un job separado levanta PostgreSQL 17 y
 ejecuta `npm run db:migrate` dos veces para comprobar que las migraciones son
-repetibles. No requiere secretos ni realiza despliegues.
+repetibles. Un tercer job (`integration`) levanta PostgreSQL 17 como servicio y
+ejecuta `npm run test:integration`. No requiere secretos ni realiza despliegues.
+
+Localmente, las pruebas de integración `npm run test:integration` usan el
+PostgreSQL de `docker compose` y siembran una empresa de prueba por corrida
+(`tests/support.ts`), con limpieza automática que desactiva temporalmente los
+triggers de inmutabilidad de pagos e inventario. El job `integration` del CI
+replica esa configuración con un servicio PostgreSQL.
 
 ### Interfaz web / PWA
 
@@ -143,3 +152,31 @@ Los reportes requieren autenticación y fechas obligatorias en formato `YYYY-MM-
 - `GET /api/v1/reports/operations-summary?...` devuelve pedidos abiertos, comandas pendientes, comandas retrasadas (más de 15 minutos), mesas ocupadas/abiertas y productos no disponibles.
 
 Permisos: una consulta con `branchId` requiere `report.branch.read`; una consulta sin sucursal requiere `report.company.read` y solo agrega sucursales asignadas al usuario. La exportación requiere además `export.read`.
+
+## Fase 6: inventario y recetas (backend)
+
+La migración `006_inventory.sql` es repetible y crea unidades, conversiones, ingredientes, almacenes, existencias, movimientos inmutables, recetas versionadas, mermas y conteos. Las existencias usan `NUMERIC(20,8)` y las modificaciones bloquean el balance con `SELECT FOR UPDATE`; por defecto una operación que produciría negativo responde `409`.
+
+Endpoints autenticados:
+
+- `GET /api/v1/units` lista unidades globales y de la empresa para formularios.
+- `GET/POST /api/v1/ingredients` y `GET/POST /api/v1/warehouses`.
+- `GET /api/v1/inventory/balances?branchId=...` y `GET /api/v1/inventory/movements?branchId=...&ingredientId=...`. Los balances hacen left join con ingredientes para mostrar existencias en cero.
+- `POST /api/v1/inventory/adjustments` con `type`, `quantity`, `unitId` y motivo obligatorio; `POST /api/v1/inventory/waste` registra merma y movimiento.
+- `GET/POST /api/v1/recipes` y `POST /api/v1/recipes/:id/versions`, que nunca sobrescribe versiones existentes.
+- `GET /api/v1/recipe-versions/:id` devuelve una versión con sus ingredientes (para consulta visual).
+- `POST /api/v1/inventory/counts` y `POST /api/v1/inventory/counts/:id/result`.
+
+Permisos: `inventory.read`, `inventory.manage`, `inventory.adjust`, `recipe.read` y `recipe.manage`. Los ajustes, mermas, cambios de receta y conteos generan auditoría. El consumo teórico no se conecta todavía con ventas ni pedidos; queda como tarea posterior para no modificar el flujo actual de pedidos.
+
+## Fase 7: interfaz de inventario (PWA)
+
+La pestaña `Inventario` se autentica con la misma sesión y agrupa cinco subvistas:
+
+- **Saldos**: existencias por almacén, con ingredientes en cero cuando no hay movimientos.
+- **Movimientos**: histórico filtrable por ingrediente y formularios de ajuste/compra (`PURCHASE`, `POSITIVE_ADJUSTMENT`, `NEGATIVE_ADJUSTMENT`) y de merma (`WASTE`).
+- **Conteos**: inicia un conteo por almacén, captura el resultado por ingrediente y completa el conteo.
+- **Recetas**: crea recetas con lista de ingredientes y abre nuevas versiones sin sobrescribir las anteriores; el detalle de una versión se consulta con `GET /api/v1/recipe-versions/:id`.
+- **Catálogo**: alta y listado de ingredientes (con unidad base) y almacenes de la sucursal activa.
+
+Los permisos degradan la interfaz de forma natural: un rol sin `inventory.*` o `recipe.*` verá los errores `403` de la API. Los datos demo se cargan con `npm run db:seed` (ver apartado de seed) y se limpiaron las empresas demo duplicadas de corridas previas.

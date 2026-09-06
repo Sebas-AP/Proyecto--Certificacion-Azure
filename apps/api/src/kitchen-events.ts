@@ -15,7 +15,15 @@ function scope(companyId: string, branchId: string): string {
 }
 
 export function publishKitchenEvent(companyId: string, event: KitchenEvent): void {
-  subscribers.get(scope(companyId, event.branchId))?.forEach((subscriber) => subscriber(event));
+  const branchSubscribers = subscribers.get(scope(companyId, event.branchId));
+  branchSubscribers?.forEach((subscriber) => {
+    try {
+      subscriber(event);
+    } catch {
+      branchSubscribers.delete(subscriber);
+    }
+  });
+  if (branchSubscribers && !branchSubscribers.size) subscribers.delete(scope(companyId, event.branchId));
 }
 
 export function subscribeKitchenEvents(companyId: string, branchId: string, subscriber: Subscriber): () => void {

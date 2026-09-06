@@ -15,6 +15,11 @@ export const permissions = {
   reportBranchRead: 'report.branch.read',
   reportCompanyRead: 'report.company.read',
   exportRead: 'export.read',
+  inventoryRead: 'inventory.read',
+  inventoryManage: 'inventory.manage',
+  inventoryAdjust: 'inventory.adjust',
+  recipeRead: 'recipe.read',
+  recipeManage: 'recipe.manage',
 } as const;
 
 export type Permission = (typeof permissions)[keyof typeof permissions];

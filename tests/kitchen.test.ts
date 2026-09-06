@@ -23,4 +23,14 @@ describe('cocina', () => {
     expect(branchOne).toEqual(['order']);
     expect(branchTwo).toEqual([]);
   });
+
+  it('ignora conexiones SSE que fallan al recibir un evento', () => {
+    const event = { id: 'event', type: 'order.sent_to_kitchen' as const, branchId: 'branch-error', orderId: 'order', status: 'PENDING', occurredAt: new Date().toISOString() };
+    subscribeKitchenEvents('company', 'branch-error', () => { throw new Error('cliente desconectado'); });
+    expect(() => publishKitchenEvent('company', event)).not.toThrow();
+    const received: string[] = [];
+    subscribeKitchenEvents('company', 'branch-error', (nextEvent) => received.push(nextEvent.orderId));
+    publishKitchenEvent('company', event);
+    expect(received).toEqual(['order']);
+  });
 });

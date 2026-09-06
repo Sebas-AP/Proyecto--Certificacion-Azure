@@ -70,7 +70,7 @@ export async function registerCatalogOrderRoutes(app: FastifyInstance): Promise<
       COALESCE(a.is_available,true) is_available, json_agg(json_build_object('id',v.id,'name',v.name,'price',v.price) ORDER BY v.name) variants
       FROM products p JOIN categories c ON c.id=p.category_id JOIN product_variants v ON v.product_id=p.id
       LEFT JOIN branch_product_availability a ON a.product_id=p.id AND a.branch_id=$1
-      WHERE p.company_id=$2 AND p.is_active AND c.is_active AND v.is_active GROUP BY p.id,c.name,a.is_available ORDER BY c.sort_order,p.name`, [branchId, (request.user as User).company_id]);
+      WHERE p.company_id=$2 AND p.is_active AND c.is_active AND v.is_active GROUP BY p.id,c.name,c.sort_order,a.is_available ORDER BY c.sort_order,p.name`, [branchId, (request.user as User).company_id]);
     return { data: result.rows };
   });
   app.patch('/api/v1/branches/:branchId/products/:productId/availability', { preHandler: requireUser }, async (request, reply) => {

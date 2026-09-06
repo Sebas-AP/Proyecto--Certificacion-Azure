@@ -171,7 +171,10 @@ export async function registerCashPaymentRoutes(app: FastifyInstance): Promise<v
 
   app.get('/api/v1/orders/:id/payments', { preHandler: requireUser }, async (request, reply) => {
     if (!(await permission(request, reply, 'cash.read'))) return;
-    const result = await pool.query(`SELECT p.*, COALESCE((SELECT SUM(r.amount) FROM refunds r WHERE r.payment_id=p.id AND r.status='APPROVED'),0) refunded_amount FROM payments p WHERE p.id IS NOT NULL AND p.order_id=$1 AND p.company_id=$2 ORDER BY p.created_at`, [params(request).id, user(request).company_id]);
+    const orderId = params(request).id;
+    const order = await pool.query(`SELECT branch_id FROM orders WHERE id=$1 AND company_id=$2`, [orderId, user(request).company_id]);
+    if (order.rowCount !== 1 || !(await allowedBranch(request, order.rows[0].branch_id))) return reply.code(404).send({ error: 'Pedido no encontrado' });
+    const result = await pool.query(`SELECT p.*, COALESCE((SELECT SUM(r.amount) FROM refunds r WHERE r.payment_id=p.id AND r.status='APPROVED'),0) refunded_amount FROM payments p WHERE p.order_id=$1 AND p.company_id=$2 ORDER BY p.created_at`, [orderId, user(request).company_id]);
     return { data: result.rows };
   });
 
