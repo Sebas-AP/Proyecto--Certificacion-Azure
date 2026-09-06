@@ -2,7 +2,7 @@
 
 ## Estado actual
 
-Implementado hasta el núcleo de la Fase 8:
+Implementado hasta la Fase 8 completa:
 
 - Fase 0: estructura, PostgreSQL, migraciones y ejecución local.
 - Fase 1: empresa, sucursales, usuarios, roles, permisos, sesiones y auditoría.
@@ -16,6 +16,7 @@ Implementado hasta el núcleo de la Fase 8:
 - Fase 7 UI: pestaña "Inventario" en la PWA con saldos, movimientos, ajustes/compra/mermas, conteos físicos, recetas con versiones y catálogo de ingredientes/almacenes.
 - Fase 7 consolidada: consumo teórico al completar venta, transferencias entre almacenes, conversiones de unidades y pruebas de concurrencia.
 - Fase 8 núcleo: proveedores, órdenes de compra, recepciones completas y parciales y costos históricos.
+- Fase 8 completa: devoluciones de compra (`return`), diferencias de precio en recepción (`unitPrice`), costos consultables (`GET /inventory/costs`, promedio simple ponderado por unidad base) y tab "Compras" en la PWA. Migración `009_purchasing_returns.sql` y 31 pruebas de integración.
 
 ## Pendiente conocido
 
@@ -54,13 +55,23 @@ El flujo visual de creación y envío de pedidos reportaba errores intermitentes
 - [x] Pruebas de integración (29 en total): proveedor con control de permisos, orden idempotente, recepción parcial → existencias y costos históricos, sobre-recepción y reposición rechazadas (409), y recepción en unidad distinta (G) con conversión a base (KG) idempotente.
 - [x] `tests/support.ts` migra hasta `008` y limpia las tablas de compras; `package.json` `db:migrate` incluye `008`; el seed demo crea un proveedor de demostración.
 
+### Tras 2026-09-05 (Fase 8 completada: devoluciones, diferencias de precio, costos y UI)
+
+- [x] Migración `009_purchasing_returns.sql`: el `CHECK` de `stock_movements` admite el tipo `RETURN`; tablas `purchase_returns` y `purchase_return_items` (con idempotencia por `idempotency_key`); `ingredient_costs` gana `quantity_base` y `total_cost` para el costo promedio.
+- [x] Recepción con diferencias de precio: `POST /purchase-orders/:id/receive` acepta `unitPrice` opcional por línea; el precio efectivo (`item.unitPrice ?? unit_price` de la orden) se guarda en `purchase_receipt_items` e `ingredient_costs` (`total_cost = unitPrice × cantidad`).
+- [x] Devoluciones: `POST /purchase-orders/:id/return` con `warehouseId`, `idempotencyKey` y líneas `{ingredientId, quantityReturned}`. Valida que no se devuelva más de lo recibido ni ya devuelto (409), registra `purchase_returns`, movimientos `RETURN` (negativos en unidad base) y auditoría; reintento idempotente 200. El detalle de la orden expone `returns` y `lines[].returned_quantity`.
+- [x] Costos consultables: `GET /api/v1/inventory/costs?branchId=&ingredientId=` (permiso `inventory.read`) devuelve por ingrediente el último costo (`last_price`/`last_unit`/`last_at`) y el **costo promedio simple**: `average_cost_per_base_unit = SUM(total_cost)/SUM(quantity_base)`.
+- [x] UI de compras en la PWA (tab Inventario > Compras): registro de proveedores, creación de órdenes de compra con líneas (ingrediente/cantidad/unidad/precio), lista y apertura de órdenes, recepción parcial con almacén, devolución con almacén y tabla de costos por ingrediente.
+- [x] Pruebas de integración (31 en total): devolución idempotente que devuelve existencias (saldo final, movimiento `RETURN`, detalle con `returned_quantity`) y diferencia de precio + costo promedio (`unitPrice` de recepción respetado, `average_cost_per_base_unit` calculado).
+- [x] `tests/support.ts` migra hasta `009` y limpia `purchase_return_items`/`purchase_returns`; `package.json` `db:migrate` incluye `009`.
+
 ### Pendiente inmediato
 
 1. Relacionar ingredientes con productos y variantes (receta ya opcionalmente liga productos).
 2. ~~Conectar una venta completada con consumo teórico~~ — hecho: consumo teórico al liquidar el pago, con saldo negativo permitido solo en ese tipo de movimiento.
-3. Costos históricos por ingrediente y proveedor: ya se registran en `ingredient_costs` al recibir; falta definir método de costo (promedio, PEPS) y mostrarlos en reportes/UI.
+3. ~~Costos históricos por ingrediente~~ — hecho: se registran en `ingredient_costs` y se consultan vía `GET /inventory/costs` con promedio simple ponderado por unidad base; falta mostrarlos en reportes de Fase 9 y conectar el costo de mermas/consumo.
 4. ~~Añadir pruebas de concurrencia, transferencias entre almacenes y conversiones de unidades~~ — hecho: endpoints y pruebas de integración agregadas.
-5. Recepciones parciales de compra: hechas en el núcleo de Fase 8; quedan devoluciones y diferencias de precio/precisión en la UI.
+5. ~~Recepciones parciales de compra y diferencias de precio~~ — hechas en el núcleo de Fase 8; devoluciones y `unitPrice` por recepción completados en la Fase 8.
 
 ### Decisiones necesarias
 
@@ -69,7 +80,7 @@ El flujo visual de creación y envío de pedidos reportaba errores intermitentes
 - Frecuencia de conteos físicos.
 - Quién puede ajustar existencias.
 - Cómo se manejan lotes, caducidades y productos perecederos.
-- Costo promedio, PEPS u otro método.
+- Costo promedio, PEPS u otro método: resuelto en Fase 8 con **promedio simple ponderado por unidad base** (`SUM(total_cost)/SUM(quantity_base)`); PEPS o último costo son mejoras posteriores.
 - Receta vigente al momento de venta.
 - Tratamiento de mermas sin costo conocido.
 
@@ -80,9 +91,9 @@ El flujo visual de creación y envío de pedidos reportaba errores intermitentes
 - Proveedores: hecho (endpoints + seed demo).
 - Solicitudes y órdenes de compra: hecho el backend (creación, consulta, cancelación en borrador).
 - Recepciones completas y parciales: hecho el backend (con `idempotency_key`, estado `PARTIALLY_RECEIVED`/`RECEIVED` y movimientos `PURCHASE`).
-- Diferencias entre pedido y recepción: recibir más de lo pedido se rechaza con `409`; la diferencia (cantidad pendiente) queda en `received_quantity`.
-- Costos históricos: hecho el registro en `ingredient_costs` al recibir; falta método de costo y reportes con costos.
-- Devoluciones: pendiente.
+- Diferencias entre pedido y recepción: recibir más de lo pedido se rechaza con `409`; la diferencia (cantidad pendiente) queda en `received_quantity`. El precio efectivo por línea puede diferir del pedido (`unitPrice` opcional en la recepción) y queda registrado en `ingredient_costs`.
+- Costos históricos: hecho — registro en `ingredient_costs` al recibir y consulta vía `GET /inventory/costs` con costo promedio simple ponderado por unidad base.
+- Devoluciones: hecho — `POST /purchase-orders/:id/return` con validación contra recibido/devuelto, movimientos `RETURN` y UI.
 - Documentos adjuntos: pendiente.
 - Compras corporativas o por sucursal: órdenes por sucursal hechas; corporativas pendiente.
 
@@ -183,7 +194,7 @@ Toda recomendación debe ser revisable, desactivable y aprobada por una persona.
 3. ~~Construir interfaz de inventario~~ — pestaña Inventario funcional (saldos, movimientos, ajustes, mermas, conteos, recetas, catálogo).
 4. ~~Completar pendientes de Fase 7~~ — consumo teórico al completar venta, transferencias entre almacenes, conversiones de unidades y pruebas de concurrencia ya implementados y probados.
 5. Completar recetas y conteos en producción (validar con datos reales).
-6. ~~Incorporar compras y proveedores~~ — núcleo de Fase 8 implementado (proveedores, órdenes de compra, recepciones completas/parciales y costos históricos); falta UI de compras, devoluciones y diferencias de precio.
+6. ~~Incorporar compras y proveedores~~ — Fase 8 completa: proveedores, órdenes de compra, recepciones completas/parciales, devoluciones, diferencias de precio, costos promedio y UI de compras.
 7. Ejecutar piloto formal.
 8. Mejorar reportes con costos y mermas.
 9. Desplegar a más sucursales.

@@ -21,13 +21,21 @@ type StockMovement = { id: string; ingredient_id: string; ingredient_name: strin
 type RecipeSummary = { id: string; name: string; versions?: { id: string; version: number; notes?: string | null; created_at: string }[] };
 type RecipeVersionDetail = { id: string; recipe_id: string; recipe_name: string; version: number; notes?: string | null; created_at: string; items: { ingredient_id: string; ingredient_name: string; quantity: string; unit_code: string }[] };
 type RecipeDraftItem = { ingredientId: string; quantity: string; unitId: string };
+type Supplier = { id: string; name: string; tax_id?: string | null; contact_name?: string | null; phone?: string | null; is_active: boolean };
+type PurchaseOrderSummary = { id: string; folio: string | number; supplier_name: string; status: string; expected_at?: string | null; created_at: string };
+type PurchaseItem = { id: string; ingredient_id: string; ingredient_name: string; quantity: string; unit_code: string; unit_price: string; received_quantity: string };
+type PurchaseLine = { id: string; ingredient_id: string; ingredient_name: string; received_quantity: string; returned_quantity: string };
+type PurchaseDetail = PurchaseOrderSummary & { notes?: string | null; items: PurchaseItem[]; receipts: any[]; returns: any[]; lines: PurchaseLine[] };
+type PurchaseDraftItem = { ingredientId: string; quantity: string; unitId: string; unitPrice: string };
+type CostEntry = { ingredient_id: string; ingredient_name: string; last_price: string; last_unit: string; last_at?: string | null; average_cost_per_base_unit: string };
 type InvCount = { id: string; warehouse_id: string };
-type InventoryTab = 'saldos' | 'movimientos' | 'conteos' | 'recetas' | 'catalogo';
+type InventoryTab = 'saldos' | 'movimientos' | 'conteos' | 'recetas' | 'catalogo' | 'compras';
 type InventoryState = {
   tab: InventoryTab; units: Unit[]; ingredients: Ingredient[]; warehouses: Warehouse[];
   balances: StockBalance[]; movements: StockMovement[]; recipes: RecipeSummary[];
   warehouseId: string; movementIngredientId: string; recipeItems: RecipeDraftItem[];
   newVersionFor?: string; count?: InvCount; version?: RecipeVersionDetail;
+  suppliers: Supplier[]; purchaseOrders: PurchaseOrderSummary[]; purchase?: PurchaseDetail; poItems: PurchaseDraftItem[]; costs: CostEntry[];
   pending: boolean; error: string;
 };
 class ApiError extends Error { constructor(message: string, readonly status: number) { super(message); } }
@@ -42,7 +50,7 @@ const api = async <T>(path: string, options: RequestInit = {}): Promise<T> => {
 };
 
 const state: { user?: User; branches: Branch[]; branch?: Branch; tables: Table[]; menu: Product[]; cart: CartLine[]; view: 'meseros' | 'cocina' | 'caja' | 'reportes' | 'inventario'; loading: boolean; error: string; connected: boolean; kitchen: KitchenTicket[]; kitchenPending: boolean; report: ReportState; inventory: InventoryState; cash?: CashSession; movements: CashMovement[]; cashOrders: CashOrder[]; selectedOrder?: CashOrder; lastOrderId?: string; receipt?: { orderId: string; totalPaid: number; pending: number; change: number } } = {
-  branches: [], tables: [], menu: [], cart: [], view: 'meseros', loading: false, error: '', connected: true, kitchen: [], kitchenPending: false, report: { permissionDenied: false, pending: false, error: '', dateFrom: new Date(Date.now() - 6 * 86400000).toISOString().slice(0, 10), dateTo: new Date(Date.now() + 86400000).toISOString().slice(0, 10) }, inventory: { tab: 'saldos', units: [], ingredients: [], warehouses: [], balances: [], movements: [], recipes: [], warehouseId: '', movementIngredientId: '', recipeItems: [], pending: false, error: '' }, movements: [], cashOrders: [],
+  branches: [], tables: [], menu: [], cart: [], view: 'meseros', loading: false, error: '', connected: true, kitchen: [], kitchenPending: false, report: { permissionDenied: false, pending: false, error: '', dateFrom: new Date(Date.now() - 6 * 86400000).toISOString().slice(0, 10), dateTo: new Date(Date.now() + 86400000).toISOString().slice(0, 10) }, inventory: { tab: 'saldos', units: [], ingredients: [], warehouses: [], balances: [], movements: [], recipes: [], warehouseId: '', movementIngredientId: '', recipeItems: [], pending: false, error: '', suppliers: [], purchaseOrders: [], poItems: [], costs: [] }, movements: [], cashOrders: [],
 };
 let kitchenStream: EventSource | undefined;
 const root = document.querySelector<HTMLDivElement>('#app')!;
@@ -163,6 +171,7 @@ const INVENTORY_TABS: { id: InventoryTab; label: string }[] = [
   { id: 'conteos', label: 'Conteos' },
   { id: 'recetas', label: 'Recetas' },
   { id: 'catalogo', label: 'Catálogo' },
+  { id: 'compras', label: 'Compras' },
 ];
 const invOptUnits = (selectedId?: string): string => state.inventory.units.length
   ? state.inventory.units.map(unit => `<option value="${unit.id}" ${unit.id === selectedId ? 'selected' : ''}>${esc(unit.name)} (${esc(unit.code)})</option>`).join('')
@@ -181,6 +190,7 @@ function inventoryView(): string {
     : state.inventory.tab === 'movimientos' ? inventoryMovementsView()
     : state.inventory.tab === 'conteos' ? inventoryCountsView()
     : state.inventory.tab === 'recetas' ? inventoryRecipesView()
+    : state.inventory.tab === 'compras' ? inventoryPurchasesView()
     : inventoryCatalogView();
   return `<section class="inventory-view">${subnav}${content}</section>`;
 }
@@ -281,6 +291,69 @@ function inventoryCatalogView(): string {
     ${state.inventory.ingredients.length ? `<div class="inv-list"><h3>Ingredientes del negocio</h3>${state.inventory.ingredients.map(ingredient => `<article class="inv-item"><div><strong>${esc(ingredient.name)}</strong>${ingredient.sku ? `<small>SKU ${esc(ingredient.sku)}</small>` : ''}</div><span class="order-status">${esc(ingredient.base_unit_code)}</span></article>`).join('')}</div>` : ''}</section></div>`;
 }
 
+function purchaseDetailView(detail: PurchaseDetail): string {
+  const open = detail.status !== 'RECEIVED' && detail.status !== 'CANCELLED';
+  const canReceiveAny = detail.items.some(item => { const line = detail.lines.find(candidate => candidate.ingredient_id === item.ingredient_id); return open && Number(line?.received_quantity ?? 0) < Number(item.quantity); });
+  const hasReceived = detail.lines.some(line => Number(line.received_quantity) > 0);
+  const rows = detail.items.map(item => {
+    const line = detail.lines.find(candidate => candidate.ingredient_id === item.ingredient_id);
+    const received = Number(line?.received_quantity ?? 0);
+    const ordered = Number(item.quantity);
+    const pending = Math.max(0, ordered - received);
+    const returned = Number(line?.returned_quantity ?? 0);
+    const canReceive = open && pending > 0;
+    const canReturn = received - returned > 0;
+    return `<tr><td><strong>${esc(item.ingredient_name)}</strong></td><td>${item.quantity} ${esc(item.unit_code)}</td><td>${money(Number(item.unit_price))}</td><td>${item.received_quantity} ${esc(item.unit_code)}</td><td>${pending} ${esc(item.unit_code)}</td><td>${returned} ${esc(item.unit_code)}</td><td><input data-recv="${item.ingredient_id}" type="number" inputmode="decimal" step="0.00000001" min="0" value="${pending || ''}" ${canReceive ? '' : 'disabled'}></td><td><input data-ret="${item.ingredient_id}" type="number" inputmode="decimal" step="0.00000001" min="0" value="0" ${canReturn ? '' : 'disabled'}></td></tr>`;
+  }).join('');
+  const warehouseOpts = invOptWarehouses();
+  return `<section class="report-section inv-card"><div class="section-head"><div><p class="eyebrow">OC #${esc(detail.folio)}</p><h2>${esc(detail.supplier_name)}</h2></div><span class="order-status">${esc(detail.status)}</span></div>
+    ${detail.notes ? `<p class="muted">${esc(detail.notes)}</p>` : ''}
+    <div class="inv-table-wrap"><table class="inv-table"><thead><tr><th>Ingrediente</th><th>Pedido</th><th>Precio</th><th>Recibido</th><th>Pendiente</th><th>Devuelto</th><th>Recibir</th><th>Devolver</th></tr></thead><tbody>${rows || '<tr><td colspan="8">Sin líneas</td></tr>'}</tbody></table></div>
+    <div class="inv-grid">
+      <div class="inv-form"><label class="inv-full"><span>Almacén de recepción</span><select data-recv-warehouse>${warehouseOpts}</select></label><button class="primary" type="button" id="po-receive" ${canReceiveAny ? '' : 'disabled'}>Registrar recepción</button></div>
+      <div class="inv-form"><label class="inv-full"><span>Almacén de devolución</span><select data-ret-warehouse>${warehouseOpts}</select></label><button class="secondary" type="button" id="po-return" ${detail.status !== 'DRAFT' && detail.status !== 'CANCELLED' ? '' : 'disabled'}>Registrar devolución</button></div>
+    </div>
+    ${detail.receipts?.length ? `<div class="inv-list"><h3>Recepciones (${detail.receipts.length})</h3>${detail.receipts.map(receipt => `<article class="inv-item"><span>${invDate(receipt.received_at)} · ${esc(receipt.warehouse_name)}</span></article>`).join('')}</div>` : ''}
+  </section>`;
+}
+
+function inventoryPurchasesView(): string {
+  const suppliers = state.inventory.suppliers;
+  const orders = state.inventory.purchaseOrders;
+  const draft = state.inventory.poItems;
+  const supplierOpts = suppliers.length ? `<option value="">Selecciona un proveedor…</option>${suppliers.map(supplier => `<option value="${supplier.id}">${esc(supplier.name)}</option>`).join('')}` : '<option value="">Sin proveedores</option>';
+  const draftList = draft.length ? `<div class="inv-full inv-list">${draft.map((item, index) => { const ingredient = state.inventory.ingredients.find(candidate => candidate.id === item.ingredientId); const unit = state.inventory.units.find(candidate => candidate.id === item.unitId); return `<article class="inv-item"><span>${esc(ingredient?.name || '')} · ${item.quantity} ${esc(unit?.code || '')} · ${money(Number(item.unitPrice) || 0)}</span><button class="ghost" data-po-remove="${index}">Quitar</button></article>`; }).join('')}</div>` : '';
+  const ordersList = orders.length ? `${orders.map(order => `<article class="inv-item"><div><strong>OC #${esc(order.folio)}</strong><small>${esc(order.supplier_name)}</small></div><div class="inv-item-actions"><span class="order-status">${esc(order.status)}</span><button class="secondary" data-po-open="${order.id}">Abrir</button></div></article>`).join('')}` : '<div class="empty"><strong>Sin órdenes de compra</strong><p>Crea la primera orden para comenzar.</p></div>';
+  const costRows = state.inventory.costs.length ? `<div class="inv-table-wrap"><table class="inv-table"><thead><tr><th>Ingrediente</th><th>Último costo</th><th>Costo promedio base</th><th>Última compra</th></tr></thead><tbody>${state.inventory.costs.map(cost => `<tr><td><strong>${esc(cost.ingredient_name)}</strong></td><td>${cost.last_price == null ? '—' : `${money(Number(cost.last_price))} / ${esc(cost.last_unit)}`}</td><td>${cost.average_cost_per_base_unit == null ? '—' : money(Number(cost.average_cost_per_base_unit))}</td><td>${cost.last_at ? invDate(cost.last_at) : '—'}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty"><strong>Sin costos históricos</strong><p>Los costos aparecerán al recibir órdenes de compra (costo promedio simple por unidad base).</p></div>';
+  return `<div class="inv-stack">
+    <section class="report-section inv-card"><div class="section-head"><div><p class="eyebrow">Abastecimiento</p><h2>Nueva orden de compra</h2></div></div>
+      <form id="po-create-form" class="inv-form">
+        <label class="inv-full"><span>Proveedor</span><select name="supplierId" required>${supplierOpts}</select></label>
+        <label><span>Ingrediente</span><select data-po-ingredient>${invOptIngredients()}</select></label>
+        <label><span>Cantidad</span><input data-po-quantity type="number" inputmode="decimal" step="0.00000001" min="0.00000001" value="1"></label>
+        <label><span>Unidad</span><select data-po-unit>${invOptUnits()}</select></label>
+        <label><span>Precio unitario</span><input data-po-price type="number" inputmode="decimal" step="0.01" min="0" value="0"></label>
+        <div class="inv-full inv-actions"><button class="secondary" type="button" id="po-add-item">+ Agregar línea</button></div>
+        ${draftList}
+        <label class="inv-full"><span>Notas</span><input name="notes" maxlength="500" placeholder="Opcional"></label>
+        <button class="primary" type="submit">Crear orden de compra</button>
+      </form></section>
+    <section class="report-section"><div class="section-head"><div><p class="eyebrow">Compras</p><h2>Órdenes de compra</h2></div></div>
+      <div class="inv-list">${ordersList}</div></section>
+    ${state.inventory.purchase ? purchaseDetailView(state.inventory.purchase) : ''}
+    <section class="report-section"><div class="section-head"><div><p class="eyebrow">Costo histórico</p><h2>Costos por ingrediente</h2></div></div>
+      ${costRows}</section>
+    <section class="report-section inv-card"><div class="section-head"><div><p class="eyebrow">Proveedores</p><h2>Nuevo proveedor</h2></div></div>
+      <form id="supplier-form" class="inv-form">
+        <label><span>Nombre</span><input name="name" maxlength="160" required placeholder="Ej. Tortillería Central"></label>
+        <label><span>RFC</span><input name="taxId" maxlength="40" placeholder="Opcional"></label>
+        <label><span>Contacto</span><input name="contactName" maxlength="120" placeholder="Opcional"></label>
+        <div class="inv-full inv-actions"><button class="primary" type="submit">Registrar proveedor</button></div>
+      </form>
+      ${suppliers.length ? `<div class="inv-list"><h3>Proveedores del negocio</h3>${suppliers.map(supplier => `<article class="inv-item"><div><strong>${esc(supplier.name)}</strong>${supplier.contact_name ? `<small>${esc(supplier.contact_name)}</small>` : ''}</div><span class="order-status">${supplier.is_active ? 'Activo' : 'Inactivo'}</span></article>`).join('')}</div>` : ''}</section>
+  </div>`;
+}
+
 function bindInventory(): void {
   document.querySelectorAll<HTMLButtonElement>('[data-inv-tab]').forEach(button => button.onclick = () => { state.inventory.tab = button.dataset.invTab as InventoryTab; state.inventory.error = ''; render(); bindInventory(); loadInventoryTab(); });
   document.querySelector<HTMLSelectElement>('[data-balances-warehouse]')?.addEventListener('change', event => { state.inventory.warehouseId = (event.target as HTMLSelectElement).value; loadInventoryTab(); });
@@ -299,6 +372,13 @@ function bindInventory(): void {
   document.querySelectorAll<HTMLButtonElement>('[data-recipe-version]').forEach(button => button.onclick = () => loadVersion(button.dataset.recipeVersion!));
   document.querySelectorAll<HTMLButtonElement>('[data-recipe-version-new]').forEach(button => button.onclick = () => { state.inventory.newVersionFor = button.dataset.recipeVersionNew; state.inventory.recipeItems = []; state.inventory.version = undefined; render(); bindInventory(); });
   document.querySelector('#inv-version-close')?.addEventListener('click', () => { state.inventory.version = undefined; render(); bindInventory(); });
+  document.querySelector('#po-create-form')?.addEventListener('submit', createPurchaseOrderWeb);
+  document.querySelector('#po-add-item')?.addEventListener('click', addPoItem);
+  document.querySelectorAll<HTMLButtonElement>('[data-po-remove]').forEach(button => button.onclick = () => { state.inventory.poItems.splice(Number(button.dataset.poRemove), 1); render(); bindInventory(); });
+  document.querySelectorAll<HTMLButtonElement>('[data-po-open]').forEach(button => button.onclick = () => openPurchase(button.dataset.poOpen!));
+  document.querySelector('#po-receive')?.addEventListener('click', submitReceiveWeb);
+  document.querySelector('#po-return')?.addEventListener('click', submitReturnWeb);
+  document.querySelector('#supplier-form')?.addEventListener('submit', createSupplierWeb);
 }
 
 async function loadInventory(): Promise<void> {
@@ -339,6 +419,16 @@ async function loadInventoryTab(): Promise<void> {
       const ingredientId = state.inventory.movementIngredientId || undefined;
       const result = await api<{ data: StockMovement[] }>(`/api/v1/inventory/movements?branchId=${state.branch.id}${ingredientId ? `&ingredientId=${ingredientId}` : ''}`);
       state.inventory.movements = result.data;
+    }
+    if (state.inventory.tab === 'compras') {
+      const [suppliers, orders, costs] = await Promise.all([
+        api<{ data: Supplier[] }>('/api/v1/suppliers'),
+        api<{ data: PurchaseOrderSummary[] }>(`/api/v1/purchase-orders?branchId=${state.branch.id}`),
+        api<{ data: CostEntry[] }>(`/api/v1/inventory/costs?branchId=${state.branch.id}`),
+      ]);
+      state.inventory.suppliers = suppliers.data;
+      state.inventory.purchaseOrders = orders.data;
+      state.inventory.costs = costs.data;
     }
     state.inventory.error = '';
     render(); bindInventory();
@@ -465,6 +555,89 @@ async function loadVersion(versionId: string): Promise<void> {
     state.inventory.version = result.data;
     state.loading = false;
     render(); bindInventory();
+  } catch (error) { showError(error); }
+}
+
+function addPoItem(): void {
+  const ingredientId = (document.querySelector('[data-po-ingredient]') as HTMLSelectElement)?.value || '';
+  const quantity = (document.querySelector('[data-po-quantity]') as HTMLInputElement)?.value || '';
+  const unitId = (document.querySelector('[data-po-unit]') as HTMLSelectElement)?.value || '';
+  const unitPrice = (document.querySelector('[data-po-price]') as HTMLInputElement)?.value || '0';
+  if (!ingredientId || !unitId || !quantity || !Number(quantity)) { state.error = 'Selecciona ingrediente, cantidad y unidad'; render(); bindInventory(); return; }
+  state.inventory.poItems.push({ ingredientId, quantity, unitId, unitPrice });
+  render(); bindInventory();
+}
+
+async function createPurchaseOrderWeb(event: Event): Promise<void> {
+  event.preventDefault();
+  if (!state.branch) return;
+  const form = new FormData(event.currentTarget as HTMLFormElement);
+  const supplierId = String(form.get('supplierId') || '');
+  const items = state.inventory.poItems;
+  if (!supplierId || !items.length) { state.error = 'Selecciona un proveedor y agrega al menos una línea'; render(); bindInventory(); return; }
+  setBusy(true);
+  try {
+    await api('/api/v1/purchase-orders', { method: 'POST', body: JSON.stringify({ branchId: state.branch.id, supplierId, idempotencyKey: `po-${crypto.randomUUID()}`, notes: form.get('notes') || undefined, items: items.map(item => ({ ingredientId: item.ingredientId, quantity: item.quantity, unitId: item.unitId, unitPrice: Number(item.unitPrice) })) }) });
+    state.inventory.poItems = [];
+    state.loading = false;
+    await loadInventoryTab();
+  } catch (error) { showError(error); }
+}
+
+async function openPurchase(id: string): Promise<void> {
+  setBusy(true);
+  try {
+    const result = await api<{ data: PurchaseDetail }>(`/api/v1/purchase-orders/${id}`);
+    state.inventory.purchase = result.data;
+    state.loading = false;
+    render(); bindInventory();
+  } catch (error) { showError(error); }
+}
+
+function collectPoValues(prefix: string): { ingredientId: string; quantity: string }[] {
+  return Array.from(document.querySelectorAll<HTMLInputElement>(`[data-${prefix}]`))
+    .filter(input => !input.disabled && Number(input.value) > 0)
+    .map(input => ({ ingredientId: input.dataset[prefix]!, quantity: input.value }));
+}
+
+async function submitReceiveWeb(): Promise<void> {
+  const detail = state.inventory.purchase;
+  if (!detail) return;
+  const items = collectPoValues('recv');
+  const warehouseId = (document.querySelector('[data-recv-warehouse]') as HTMLSelectElement)?.value || '';
+  if (!items.length || !warehouseId) { state.error = 'Indica la cantidad a recibir y el almacén'; render(); bindInventory(); return; }
+  setBusy(true);
+  try {
+    await api(`/api/v1/purchase-orders/${detail.id}/receive`, { method: 'POST', body: JSON.stringify({ warehouseId, idempotencyKey: `recv-${crypto.randomUUID()}`, items }) });
+    state.loading = false;
+    await openPurchase(detail.id);
+    await loadInventoryTab();
+  } catch (error) { showError(error); }
+}
+
+async function submitReturnWeb(): Promise<void> {
+  const detail = state.inventory.purchase;
+  if (!detail) return;
+  const items = collectPoValues('ret');
+  const warehouseId = (document.querySelector('[data-ret-warehouse]') as HTMLSelectElement)?.value || '';
+  if (!items.length || !warehouseId) { state.error = 'Indica la cantidad a devolver y el almacén'; render(); bindInventory(); return; }
+  setBusy(true);
+  try {
+    await api(`/api/v1/purchase-orders/${detail.id}/return`, { method: 'POST', body: JSON.stringify({ warehouseId, idempotencyKey: `ret-${crypto.randomUUID()}`, items }) });
+    state.loading = false;
+    await openPurchase(detail.id);
+    await loadInventoryTab();
+  } catch (error) { showError(error); }
+}
+
+async function createSupplierWeb(event: Event): Promise<void> {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget as HTMLFormElement);
+  setBusy(true);
+  try {
+    await api('/api/v1/suppliers', { method: 'POST', body: JSON.stringify({ name: form.get('name'), taxId: form.get('taxId') || undefined, contactName: form.get('contactName') || undefined }) });
+    state.loading = false;
+    await loadInventoryTab();
   } catch (error) { showError(error); }
 }
 

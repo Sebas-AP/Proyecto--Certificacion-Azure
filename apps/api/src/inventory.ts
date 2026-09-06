@@ -235,6 +235,26 @@ export async function registerInventoryRoutes(app: FastifyInstance): Promise<voi
     const input = z.object({ items: z.array(z.object({ ingredientId: uuid, countedQuantity: z.string().regex(/^\d+(\.\d{1,8})?$/), unitId: uuid })).min(1) }).safeParse(request.body); if (!input.success) return reply.code(400).send({ error: 'Resultado de conteo invalido' });
     return completeCount(request, reply, (request.params as { id: string }).id, input.data.items);
   });
+  app.get('/api/v1/inventory/costs', { preHandler: requireUser }, async (request, reply) => {
+    if (!(await permission(request, reply, 'inventory.read'))) return;
+    const query = request.query as { branchId?: string; ingredientId?: string };
+    if (!query.branchId || !uuid.safeParse(query.branchId).success || !(await allowedBranch(request, query.branchId))) return reply.code(403).send({ error: 'Sucursal no autorizada' });
+    const ingredientId = query.ingredientId && uuid.safeParse(query.ingredientId).success ? query.ingredientId : null;
+    const result = await pool.query(`WITH agg AS (
+        SELECT ic.ingredient_id, max(ic.occurred_at) last_at,
+          (array_agg(ic.unit_price ORDER BY ic.occurred_at DESC, ic.id DESC))[1] last_price,
+          (array_agg(u.code ORDER BY ic.occurred_at DESC, ic.id DESC))[1] last_unit,
+          SUM(ic.total_cost) total_cost, SUM(ic.quantity_base) qty_base
+        FROM ingredient_costs ic JOIN units u ON u.id=ic.unit_id
+        WHERE ic.company_id=$1 AND ic.branch_id=$2 AND ic.source='PURCHASE'
+        GROUP BY ic.ingredient_id)
+      SELECT i.id ingredient_id, i.name ingredient_name, a.last_price, a.last_unit, a.last_at,
+        CASE WHEN a.qty_base > 0 THEN round(a.total_cost/a.qty_base, 4) ELSE NULL END average_cost_per_base_unit
+      FROM agg a JOIN ingredients i ON i.id=a.ingredient_id
+      WHERE $3::uuid IS NULL OR a.ingredient_id=$3
+      ORDER BY i.name`, [userOf(request).company_id, query.branchId, ingredientId]);
+    return { data: result.rows };
+  });
 }
 
 async function createMovementRoute(request: FastifyRequest, reply: FastifyReply, allowedTypes: string[]) {

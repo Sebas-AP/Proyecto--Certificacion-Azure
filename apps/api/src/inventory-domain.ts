@@ -1,4 +1,4 @@
-export type InventoryMovementType = 'PURCHASE' | 'THEORETICAL_CONSUMPTION' | 'WASTE' | 'POSITIVE_ADJUSTMENT' | 'NEGATIVE_ADJUSTMENT' | 'TRANSFER_IN' | 'TRANSFER_OUT' | 'COUNT';
+export type InventoryMovementType = 'PURCHASE' | 'THEORETICAL_CONSUMPTION' | 'WASTE' | 'POSITIVE_ADJUSTMENT' | 'NEGATIVE_ADJUSTMENT' | 'TRANSFER_IN' | 'TRANSFER_OUT' | 'COUNT' | 'RETURN';
 
 export function convertQuantity(quantity: string, factor: string): string {
   const value = Number(quantity) * Number(factor);
@@ -8,7 +8,7 @@ export function convertQuantity(quantity: string, factor: string): string {
 
 export function movementDelta(type: InventoryMovementType, quantity: string): string {
   if (Number(quantity) <= 0 || !Number.isFinite(Number(quantity))) throw new Error('La cantidad debe ser positiva');
-  return ['THEORETICAL_CONSUMPTION', 'WASTE', 'NEGATIVE_ADJUSTMENT', 'TRANSFER_OUT'].includes(type) ? `-${quantity}` : quantity;
+  return ['THEORETICAL_CONSUMPTION', 'WASTE', 'NEGATIVE_ADJUSTMENT', 'TRANSFER_OUT', 'RETURN'].includes(type) ? `-${quantity}` : quantity;
 }
 
 export function resultingQuantity(current: string, delta: string, allowNegative = false): string {

@@ -97,7 +97,16 @@ export async function registerPurchasingRoutes(app: FastifyInstance): Promise<vo
       FROM purchase_order_items poi JOIN ingredients i ON i.id=poi.ingredient_id JOIN units u ON u.id=poi.unit_id
       WHERE poi.purchase_order_id=$1 ORDER BY i.name`, [id]);
     const receipts = await pool.query(`SELECT pr.*, w.name warehouse_name FROM purchase_receipts pr JOIN warehouses w ON w.id=pr.warehouse_id WHERE pr.purchase_order_id=$1 ORDER BY pr.received_at`, [id]);
-    return { data: { ...po.rows[0], items: items.rows, receipts: receipts.rows } };
+    const returns = await pool.query(`SELECT pr2.*, w.name warehouse_name, (SELECT json_agg(json_build_object('ingredient_id', pri.ingredient_id, 'ingredient_name', i.name, 'quantity_returned', pri.quantity_returned, 'unit_code', u.code) ORDER BY pri.id)) items
+      FROM purchase_returns pr2 JOIN warehouses w ON w.id=pr2.warehouse_id
+      LEFT JOIN purchase_return_items pri ON pri.purchase_return_id=pr2.id
+      LEFT JOIN ingredients i ON i.id=pri.ingredient_id LEFT JOIN units u ON u.id=pri.unit_id
+      WHERE pr2.purchase_order_id=$1 GROUP BY pr2.id, w.name ORDER BY pr2.created_at`, [id]);
+    const lines = await pool.query(`SELECT poi.id, poi.ingredient_id, i.name ingredient_name, poi.received_quantity, COALESCE(rt.returned,0) returned_quantity FROM purchase_order_items poi
+      JOIN ingredients i ON i.id=poi.ingredient_id
+      LEFT JOIN (SELECT pri.purchase_order_item_id, SUM(pri.quantity_returned) returned FROM purchase_return_items pri GROUP BY pri.purchase_order_item_id) rt ON rt.purchase_order_item_id=poi.id
+      WHERE poi.purchase_order_id=$1`, [id]);
+    return { data: { ...po.rows[0], items: items.rows, receipts: receipts.rows, returns: returns.rows, lines: lines.rows } };
   });
 
   app.post('/api/v1/purchase-orders', { preHandler: requireUser }, async (request, reply) => {
@@ -138,7 +147,7 @@ export async function registerPurchasingRoutes(app: FastifyInstance): Promise<vo
     if (!(await permission(request, reply, 'purchase.receive'))) return;
     const input = z.object({
       warehouseId: uuid, idempotencyKey: z.string().trim().min(8).max(120), notes: z.string().max(500).optional(),
-      items: z.array(z.object({ ingredientId: uuid, quantityReceived: quantity })).min(1),
+      items: z.array(z.object({ ingredientId: uuid, quantityReceived: quantity, unitPrice: unitPrice.optional() })).min(1),
     }).safeParse(request.body);
     const orderId = (request.params as { id: string }).id;
     if (!input.success || !uuid.safeParse(orderId).success) return reply.code(400).send({ error: 'Recepcion invalida' });
@@ -172,9 +181,11 @@ export async function registerPurchasingRoutes(app: FastifyInstance): Promise<vo
           ? item.quantityReceived
           : trimmed(Number(convertQuantity(item.quantityReceived, (await conversionFactor(client, userOf(request).company_id, line.unit_id, line.base_unit_id))!)));
         await addMovement(client, { companyId: userOf(request).company_id, branchId: order.rows[0].branch_id, warehouseId: input.data.warehouseId, ingredientId: item.ingredientId, movementType: 'PURCHASE', quantity: item.quantityReceived, unitId: line.unit_id, reason: `Recepcion OC ${order.rows[0].folio}`, actorId: userOf(request).id, referenceId: movementReference, signedDelta: baseDelta });
+        const receiptUnitPrice = item.unitPrice ?? line.unit_price;
         await client.query('UPDATE purchase_order_items SET received_quantity=received_quantity+$1 WHERE id=$2', [item.quantityReceived, line.id]);
-        await client.query('INSERT INTO purchase_receipt_items (purchase_receipt_id,purchase_order_item_id,ingredient_id,quantity_received,unit_id,unit_price) VALUES ($1,$2,$3,$4,$5,$6)', [receipt.rows[0].id, line.id, item.ingredientId, item.quantityReceived, line.unit_id, line.unit_price]);
-        await client.query('INSERT INTO ingredient_costs (company_id,branch_id,ingredient_id,unit_id,unit_price,source,purchase_receipt_id) VALUES ($1,$2,$3,$4,$5,\'PURCHASE\',$6)', [userOf(request).company_id, order.rows[0].branch_id, item.ingredientId, line.unit_id, line.unit_price, receipt.rows[0].id]);
+        await client.query('INSERT INTO purchase_receipt_items (purchase_receipt_id,purchase_order_item_id,ingredient_id,quantity_received,unit_id,unit_price) VALUES ($1,$2,$3,$4,$5,$6)', [receipt.rows[0].id, line.id, item.ingredientId, item.quantityReceived, line.unit_id, receiptUnitPrice]);
+        await client.query('INSERT INTO ingredient_costs (company_id,branch_id,ingredient_id,unit_id,unit_price,quantity_base,total_cost,source,purchase_receipt_id) VALUES ($1,$2,$3,$4,$5,$6,$7,\'PURCHASE\',$8)',
+          [userOf(request).company_id, order.rows[0].branch_id, item.ingredientId, line.unit_id, receiptUnitPrice, baseDelta, Number((receiptUnitPrice * Number(item.quantityReceived)).toFixed(2)), receipt.rows[0].id]);
       }
       const refreshed = await client.query('SELECT count(*) FILTER (WHERE received_quantity >= quantity)::int full, count(*)::int total FROM purchase_order_items WHERE purchase_order_id=$1', [orderId]);
       const nextStatus = refreshed.rows[0].full >= refreshed.rows[0].total ? 'RECEIVED' : 'PARTIALLY_RECEIVED';
@@ -182,6 +193,59 @@ export async function registerPurchasingRoutes(app: FastifyInstance): Promise<vo
       await audit(client, userOf(request), order.rows[0].branch_id, 'purchase_receipt', receipt.rows[0].id, 'purchase_receipt.created', `OC ${order.rows[0].folio}`);
       await client.query('COMMIT');
       return reply.code(201).send({ data: receipt.rows[0], status: nextStatus, idempotent: false });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      if ((error as { statusCode?: number }).statusCode) return reply.code((error as { statusCode: number }).statusCode).send({ error: (error as Error).message });
+      if ((error as Error).message.includes('negativa')) return reply.code(409).send({ error: (error as Error).message });
+      throw error;
+    } finally { client.release(); }
+  });
+
+  app.post('/api/v1/purchase-orders/:id/return', { preHandler: requireUser }, async (request, reply) => {
+    if (!(await permission(request, reply, 'purchase.receive'))) return;
+    const input = z.object({
+      warehouseId: uuid, idempotencyKey: z.string().trim().min(8).max(120), notes: z.string().max(500).optional(),
+      items: z.array(z.object({ ingredientId: uuid, quantityReturned: quantity })).min(1),
+    }).safeParse(request.body);
+    const orderId = (request.params as { id: string }).id;
+    if (!input.success || !uuid.safeParse(orderId).success) return reply.code(400).send({ error: 'Devolucion invalida' });
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const prior = await client.query('SELECT * FROM purchase_returns WHERE idempotency_key=$1', [input.data.idempotencyKey]);
+      if (prior.rowCount) { await client.query('ROLLBACK'); return { data: prior.rows[0], idempotent: true }; }
+      const order = await client.query('SELECT * FROM purchase_orders WHERE id=$1 AND company_id=$2 FOR UPDATE', [orderId, userOf(request).company_id]);
+      if (order.rowCount !== 1) { await client.query('ROLLBACK'); return reply.code(404).send({ error: 'Orden de compra no encontrada' }); }
+      if (!(await allowedBranch(request, order.rows[0].branch_id))) { await client.query('ROLLBACK'); return reply.code(403).send({ error: 'Sucursal no autorizada' }); }
+      if (['DRAFT', 'CANCELLED'].includes(order.rows[0].status)) { await client.query('ROLLBACK'); return reply.code(409).send({ error: 'La orden no tiene recepciones para devolver' }); }
+      const warehouse = await client.query('SELECT id FROM warehouses WHERE id=$1 AND company_id=$2 AND branch_id=$3 AND is_active', [input.data.warehouseId, userOf(request).company_id, order.rows[0].branch_id]);
+      if (warehouse.rowCount !== 1) { await client.query('ROLLBACK'); return reply.code(400).send({ error: 'Almacen invalido' }); }
+      const items = await client.query(`SELECT poi.id,poi.ingredient_id,poi.quantity,poi.received_quantity,poi.unit_id,i.base_unit_id
+        FROM purchase_order_items poi JOIN ingredients i ON i.id=poi.ingredient_id WHERE poi.purchase_order_id=$1 ORDER BY poi.id FOR UPDATE OF poi`, [orderId]);
+      const itemById = new Map(items.rows.map((row: any) => [row.ingredient_id, row]));
+      const returnedSoFar = await client.query(`SELECT pri.purchase_order_item_id, COALESCE(SUM(pri.quantity_returned),0) returned
+        FROM purchase_return_items pri JOIN purchase_returns pr ON pr.id=pri.purchase_return_id
+        WHERE pr.purchase_order_id=$1 GROUP BY pri.purchase_order_item_id`, [orderId]);
+      const returnedMap = new Map(returnedSoFar.rows.map((row: any) => [row.purchase_order_item_id, Number(row.returned)]));
+      for (const item of input.data.items) {
+        const line = itemById.get(item.ingredientId);
+        if (!line) throw Object.assign(new Error('Ingrediente no incluido en la orden'), { statusCode: 400 });
+        const receivable = Number(line.received_quantity) - (returnedMap.get(line.id) ?? 0);
+        if (Number(item.quantityReturned) > receivable) throw Object.assign(new Error('La devolucion sobrepasa lo recibido'), { statusCode: 409 });
+      }
+      const refund = await client.query('INSERT INTO purchase_returns (company_id,branch_id,purchase_order_id,warehouse_id,returned_by,notes,idempotency_key) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *',
+        [userOf(request).company_id, order.rows[0].branch_id, orderId, input.data.warehouseId, userOf(request).id, input.data.notes ?? null, input.data.idempotencyKey]);
+      for (const item of input.data.items) {
+        const line = itemById.get(item.ingredientId)!;
+        const baseDelta = line.unit_id === line.base_unit_id
+          ? item.quantityReturned
+          : trimmed(Number(convertQuantity(item.quantityReturned, (await conversionFactor(client, userOf(request).company_id, line.unit_id, line.base_unit_id))!)));
+        await addMovement(client, { companyId: userOf(request).company_id, branchId: order.rows[0].branch_id, warehouseId: input.data.warehouseId, ingredientId: item.ingredientId, movementType: 'RETURN', quantity: item.quantityReturned, unitId: line.unit_id, reason: `Devolucion OC ${order.rows[0].folio}`, actorId: userOf(request).id, referenceId: refund.rows[0].id, signedDelta: `-${baseDelta}` });
+        await client.query('INSERT INTO purchase_return_items (purchase_return_id,purchase_order_item_id,ingredient_id,quantity_returned,unit_id) VALUES ($1,$2,$3,$4,$5)', [refund.rows[0].id, line.id, item.ingredientId, item.quantityReturned, line.unit_id]);
+      }
+      await audit(client, userOf(request), order.rows[0].branch_id, 'purchase_return', refund.rows[0].id, 'purchase_return.created', `OC ${order.rows[0].folio}`);
+      await client.query('COMMIT');
+      return reply.code(201).send({ data: refund.rows[0], idempotent: false });
     } catch (error) {
       await client.query('ROLLBACK');
       if ((error as { statusCode?: number }).statusCode) return reply.code((error as { statusCode: number }).statusCode).send({ error: (error as Error).message });

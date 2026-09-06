@@ -700,4 +700,86 @@ describe('compras y proveedores', () => {
     expect(Number(purchase[0].quantity)).toBeCloseTo(1500, 5);
     expect(purchase[0].unit_code).toBe('G');
   });
+
+  it('registra una devolucion que devuelve existencias de forma idempotente', async () => {
+    const ingredient = await call(adminCookie, 'POST', '/api/v1/ingredients', { name: 'Masa devolucion', sku: 'PRUEBA-DEVOLUCION', baseUnitId: kgUnitId });
+    expect(ingredient.status).toBe(201);
+    const returnIngredientId = ingredient.json.data.id;
+    const po = await call(adminCookie, 'POST', '/api/v1/purchase-orders', {
+      branchId: env.branchId, supplierId, idempotencyKey: `po-return-${crypto.randomUUID()}`,
+      items: [{ ingredientId: returnIngredientId, quantity: '3', unitId: kgUnitId, unitPrice: 20 }],
+    });
+    expect(po.status).toBe(201);
+    const poIdReturn = po.json.data.id;
+    const receive = await call(adminCookie, 'POST', `/api/v1/purchase-orders/${poIdReturn}/receive`, {
+      warehouseId, idempotencyKey: `recv-return-${crypto.randomUUID()}`, items: [{ ingredientId: returnIngredientId, quantityReceived: '3' }],
+    });
+    expect(receive.status).toBe(201);
+    expect(receive.json.status).toBe('RECEIVED');
+
+    const returnKey = `return-${crypto.randomUUID()}`;
+    const refund = await call(adminCookie, 'POST', `/api/v1/purchase-orders/${poIdReturn}/return`, {
+      warehouseId, idempotencyKey: returnKey, items: [{ ingredientId: returnIngredientId, quantityReturned: '1' }],
+    });
+    expect(refund.status).toBe(201);
+
+    const retry = await call(adminCookie, 'POST', `/api/v1/purchase-orders/${poIdReturn}/return`, {
+      warehouseId, idempotencyKey: returnKey, items: [{ ingredientId: returnIngredientId, quantityReturned: '1' }],
+    });
+    expect(retry.status).toBe(200);
+    expect(retry.json.idempotent).toBe(true);
+
+    const over = await call(adminCookie, 'POST', `/api/v1/purchase-orders/${poIdReturn}/return`, {
+      warehouseId, idempotencyKey: `return-${crypto.randomUUID()}`, items: [{ ingredientId: returnIngredientId, quantityReturned: '3' }],
+    });
+    expect(over.status).toBe(409);
+
+    const balances = await call(adminCookie, 'GET', `/api/v1/inventory/balances?branchId=${env.branchId}`);
+    expect(balanceOf(balances.json.data, returnIngredientId, warehouseId)).toBeCloseTo(2, 5);
+
+    const movements = await call(adminCookie, 'GET', `/api/v1/inventory/movements?branchId=${env.branchId}&ingredientId=${returnIngredientId}`);
+    const returns = movements.json.data.filter((m: any) => m.movement_type === 'RETURN');
+    expect(returns).toHaveLength(1);
+    expect(Number(returns[0].quantity)).toBeCloseTo(1, 5);
+
+    const detail = await call(adminCookie, 'GET', `/api/v1/purchase-orders/${poIdReturn}`);
+    expect(detail.json.data.returns).toHaveLength(1);
+    expect(Number(detail.json.data.lines[0].returned_quantity)).toBe(1);
+  });
+
+  it('respeta el precio de recepcion y calcula el costo promedio por unidad base', async () => {
+    const ingredient = await call(adminCookie, 'POST', '/api/v1/ingredients', { name: 'Harina precio', sku: 'PRUEBA-PRECIO', baseUnitId: kgUnitId });
+    expect(ingredient.status).toBe(201);
+    const priceIngredientId = ingredient.json.data.id;
+
+    const poOne = await call(adminCookie, 'POST', '/api/v1/purchase-orders', {
+      branchId: env.branchId, supplierId, idempotencyKey: `po-price-1-${crypto.randomUUID()}`,
+      items: [{ ingredientId: priceIngredientId, quantity: '10', unitId: kgUnitId, unitPrice: 15 }],
+    });
+    expect(poOne.status).toBe(201);
+    const first = await call(adminCookie, 'POST', `/api/v1/purchase-orders/${poOne.json.data.id}/receive`, {
+      warehouseId, idempotencyKey: `recv-price-1-${crypto.randomUUID()}`, items: [{ ingredientId: priceIngredientId, quantityReceived: '10', unitPrice: 14.5 }],
+    });
+    expect(first.status).toBe(201);
+
+    const cost = await pool.query('SELECT unit_price,total_cost,quantity_base FROM ingredient_costs WHERE company_id=$1 AND ingredient_id=$2 ORDER BY occurred_at DESC, id DESC LIMIT 1', [env.companyId, priceIngredientId]);
+    expect(Number(cost.rows[0].unit_price)).toBe(14.5);
+    expect(Number(cost.rows[0].total_cost)).toBe(145);
+
+    const poTwo = await call(adminCookie, 'POST', '/api/v1/purchase-orders', {
+      branchId: env.branchId, supplierId, idempotencyKey: `po-price-2-${crypto.randomUUID()}`,
+      items: [{ ingredientId: priceIngredientId, quantity: '5', unitId: kgUnitId, unitPrice: 16 }],
+    });
+    expect(poTwo.status).toBe(201);
+    const second = await call(adminCookie, 'POST', `/api/v1/purchase-orders/${poTwo.json.data.id}/receive`, {
+      warehouseId, idempotencyKey: `recv-price-2-${crypto.randomUUID()}`, items: [{ ingredientId: priceIngredientId, quantityReceived: '5' }],
+    });
+    expect(second.status).toBe(201);
+
+    const costs = await call(adminCookie, 'GET', `/api/v1/inventory/costs?branchId=${env.branchId}&ingredientId=${priceIngredientId}`);
+    expect(costs.status).toBe(200);
+    const entry = costs.json.data[0];
+    expect(Number(entry.last_price)).toBe(16);
+    expect(Number(entry.average_cost_per_base_unit)).toBeCloseTo(15, 4);
+  });
 });

@@ -18,6 +18,7 @@ const MIGRATIONS = [
   '006_inventory.sql',
   '007_inventory_consumption.sql',
   '008_purchasing.sql',
+  '009_purchasing_returns.sql',
 ];
 
 export async function migrate(): Promise<void> {
@@ -116,6 +117,8 @@ async function deleteCompanyData(client: { query: (text: string, values?: unknow
   await client.query(`DELETE FROM ingredient_costs WHERE company_id=$1`, [companyId]);
   await client.query(`DELETE FROM purchase_receipt_items WHERE purchase_receipt_id IN (SELECT id FROM purchase_receipts WHERE company_id=$1)`, [companyId]);
   await client.query(`DELETE FROM purchase_receipts WHERE company_id=$1`, [companyId]);
+  await client.query(`DELETE FROM purchase_return_items WHERE purchase_return_id IN (SELECT id FROM purchase_returns WHERE company_id=$1)`, [companyId]);
+  await client.query(`DELETE FROM purchase_returns WHERE company_id=$1`, [companyId]);
   await client.query(`DELETE FROM purchase_order_items WHERE purchase_order_id IN (SELECT id FROM purchase_orders WHERE company_id=$1)`, [companyId]);
   await client.query(`DELETE FROM purchase_orders WHERE company_id=$1`, [companyId]);
   await client.query(`DELETE FROM suppliers WHERE company_id=$1`, [companyId]);
