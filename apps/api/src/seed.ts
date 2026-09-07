@@ -28,6 +28,17 @@ try {
      RETURNING id`,
     [companyId, 'Sucursal piloto', 'PILOTO', 'America/Mexico_City'],
   );
+  const alameda = await client.query(
+    `INSERT INTO branches (company_id, name, code, address, timezone)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (company_id, code) DO UPDATE SET name = EXCLUDED.name, address = EXCLUDED.address
+     RETURNING id`,
+    [companyId, 'Sucursal Alameda', 'ALAMEDA', 'Calle Alameda 456, Col. Centro', 'America/Mexico_City'],
+  );
+  const branches = [
+    { id: branch.rows[0].id, ...branch.rows[0] },
+    { id: alameda.rows[0].id, ...alameda.rows[0] },
+  ];
   const role = await client.query(
     `INSERT INTO roles (company_id, name, description) VALUES ($1, $2, $3)
      ON CONFLICT (company_id, name) DO UPDATE SET description = EXCLUDED.description
@@ -49,6 +60,23 @@ try {
   );
   await client.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [user.rows[0].id, role.rows[0].id]);
   await client.query('INSERT INTO user_branches (user_id, branch_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [user.rows[0].id, branch.rows[0].id]);
+  await client.query('INSERT INTO user_branches (user_id, branch_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [user.rows[0].id, alameda.rows[0].id]);
+  for (const row of branches) {
+    for (const day of [0, 1, 2, 3, 4, 5, 6]) {
+      await client.query(
+        `INSERT INTO branch_business_hours (branch_id, day_of_week, time_from, time_to)
+         VALUES ($1, $2, '07:00', '22:00')
+         ON CONFLICT (branch_id, day_of_week) DO UPDATE SET time_from = EXCLUDED.time_from, time_to = EXCLUDED.time_to`,
+        [row.id, day],
+      );
+    }
+  }
+  await client.query(
+    `INSERT INTO cash_registers (company_id, branch_id, name)
+     VALUES ($1, $2, 'Caja principal')
+     ON CONFLICT (branch_id, name) DO UPDATE SET is_active = true`,
+    [companyId, alameda.rows[0].id],
+  );
   await client.query(
     `UPDATE sessions SET revoked_at = now()
      WHERE user_id IN (SELECT id FROM users WHERE email = $1 AND id <> $2) AND revoked_at IS NULL`,
@@ -120,16 +148,32 @@ try {
          SET is_available = true, updated_at = now(), updated_by = EXCLUDED.updated_by`,
       [branch.rows[0].id, product.rows[0].id, user.rows[0].id],
     );
+    await client.query(
+      `INSERT INTO branch_product_availability (branch_id, product_id, is_available, updated_by)
+       VALUES ($1, $2, true, $3)
+       ON CONFLICT (branch_id, product_id) DO UPDATE
+         SET is_available = true, updated_at = now(), updated_by = EXCLUDED.updated_by`,
+      [alameda.rows[0].id, product.rows[0].id, user.rows[0].id],
+    );
+    await client.query(
+      `INSERT INTO branch_product_hours (branch_id, product_id, day_of_week, time_from, time_to)
+       SELECT $1, $2, day, '08:00', '14:00' FROM generate_series(0, 6) AS day
+       WHERE $3 = 'DEMO-GORDITA-FRIJOL'
+       ON CONFLICT DO NOTHING`,
+      [alameda.rows[0].id, product.rows[0].id, demoProduct.sku],
+    );
   }
 
-  for (const [name, capacity] of [['Mesa 1', 2], ['Mesa 2', 2], ['Mesa 3', 4], ['Mesa 4', 6]] as const) {
-    await client.query(
-      `INSERT INTO restaurant_tables (company_id, branch_id, name, capacity, status)
-       VALUES ($1, $2, $3, $4, 'AVAILABLE')
-       ON CONFLICT (branch_id, name) DO UPDATE
-         SET company_id = EXCLUDED.company_id, capacity = EXCLUDED.capacity, status = 'AVAILABLE'`,
-      [companyId, branch.rows[0].id, name, capacity],
-    );
+  for (const row of branches) {
+    for (const [name, capacity] of [['Mesa 1', 2], ['Mesa 2', 2], ['Mesa 3', 4], ['Mesa 4', 6]] as const) {
+      await client.query(
+        `INSERT INTO restaurant_tables (company_id, branch_id, name, capacity, status)
+         VALUES ($1, $2, $3, $4, 'AVAILABLE')
+         ON CONFLICT (branch_id, name) DO UPDATE
+           SET company_id = EXCLUDED.company_id, capacity = EXCLUDED.capacity, status = 'AVAILABLE'`,
+        [companyId, row.id, name, capacity],
+      );
+    }
   }
 
   await client.query(

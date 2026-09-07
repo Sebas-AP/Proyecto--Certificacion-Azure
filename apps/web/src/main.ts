@@ -1,9 +1,9 @@
 import './styles.css';
 
-type Branch = { id: string; name: string; code: string; address?: string };
+type Branch = { id: string; name: string; code: string; address?: string; timezone?: string; is_active?: boolean };
 type Table = { id: string; name: string; capacity: number; status: string };
 type Variant = { id: string; name: string; price: number };
-type Product = { id: string; name: string; description?: string; category_name: string; is_available: boolean; variants: Variant[] };
+type Product = { id: string; name: string; description?: string; category_name: string; is_available: boolean; available_now?: boolean; variants: Variant[] };
 type CartLine = { product: Product; variant: Variant; quantity: number };
 type User = { id: string; email?: string; name?: string; roles?: string[] };
 type KitchenTicket = { id: string; folio?: string | number; kitchen_status?: string; items?: { product_name: string; variant_name?: string; quantity: number }[]; created_at?: string };
@@ -49,8 +49,8 @@ const api = async <T>(path: string, options: RequestInit = {}): Promise<T> => {
   return body as T;
 };
 
-const state: { user?: User; branches: Branch[]; branch?: Branch; tables: Table[]; menu: Product[]; cart: CartLine[]; view: 'meseros' | 'cocina' | 'caja' | 'reportes' | 'inventario'; loading: boolean; error: string; connected: boolean; kitchen: KitchenTicket[]; kitchenPending: boolean; report: ReportState; inventory: InventoryState; cash?: CashSession; movements: CashMovement[]; cashOrders: CashOrder[]; selectedOrder?: CashOrder; lastOrderId?: string; receipt?: { orderId: string; totalPaid: number; pending: number; change: number } } = {
-  branches: [], tables: [], menu: [], cart: [], view: 'meseros', loading: false, error: '', connected: true, kitchen: [], kitchenPending: false, report: { permissionDenied: false, pending: false, error: '', dateFrom: new Date(Date.now() - 6 * 86400000).toISOString().slice(0, 10), dateTo: new Date(Date.now() + 86400000).toISOString().slice(0, 10) }, inventory: { tab: 'saldos', units: [], ingredients: [], warehouses: [], balances: [], movements: [], recipes: [], warehouseId: '', movementIngredientId: '', recipeItems: [], pending: false, error: '', suppliers: [], purchaseOrders: [], poItems: [], costs: [] }, movements: [], cashOrders: [],
+const state: { user?: User; branches: Branch[]; branch?: Branch; branchOpen?: boolean; tables: Table[]; menu: Product[]; cart: CartLine[]; view: 'meseros' | 'cocina' | 'caja' | 'reportes' | 'inventario' | 'sucursales'; loading: boolean; error: string; connected: boolean; kitchen: KitchenTicket[]; kitchenPending: boolean; report: ReportState; inventory: InventoryState; cash?: CashSession; movements: CashMovement[]; cashOrders: CashOrder[]; selectedOrder?: CashOrder; lastOrderId?: string; receipt?: { orderId: string; totalPaid: number; pending: number; change: number }; suc: { branches: Branch[]; products: { id: string; name: string }[]; hours: Record<string, { day: number; from: string; to: string }[]>; windows: { day: number; from: string; to: string }[]; windowBranch?: string; windowProduct?: string; pending: boolean; error: string } } = {
+  branches: [], tables: [], menu: [], cart: [], view: 'meseros', loading: false, error: '', connected: true, branchOpen: true, kitchen: [], kitchenPending: false, report: { permissionDenied: false, pending: false, error: '', dateFrom: new Date(Date.now() - 6 * 86400000).toISOString().slice(0, 10), dateTo: new Date(Date.now() + 86400000).toISOString().slice(0, 10) }, inventory: { tab: 'saldos', units: [], ingredients: [], warehouses: [], balances: [], movements: [], recipes: [], warehouseId: '', movementIngredientId: '', recipeItems: [], pending: false, error: '', suppliers: [], purchaseOrders: [], poItems: [], costs: [] }, movements: [], cashOrders: [], suc: { branches: [], products: [], hours: {}, windows: [], pending: false, error: '' },
 };
 let kitchenStream: EventSource | undefined;
 const root = document.querySelector<HTMLDivElement>('#app')!;
@@ -65,21 +65,21 @@ function render(): void {
   root.innerHTML = `<div class="app-shell">
     <header class="topbar"><div class="brand"><span class="brand-mark">G</span><div><strong>GorditasOS</strong><small>Operación diaria</small></div></div>
       <div class="top-actions"><span class="connection ${state.connected ? 'online' : 'offline'}"><i></i>${state.connected ? 'Conectado' : 'Sin conexión'}</span><button class="ghost" id="logout">Salir</button></div></header>
-    <main><div class="page-heading"><div><p class="eyebrow">${state.view === 'meseros' ? 'Sala y pedidos' : state.view === 'cocina' ? 'Producción' : state.view === 'caja' ? 'Cobros y turno' : state.view === 'inventario' ? 'Inventario y recetas' : 'Consulta operativa'}</p><h1>${state.view === 'meseros' ? 'Toma de pedidos' : state.view === 'cocina' ? 'Cocina' : state.view === 'caja' ? 'Caja' : state.view === 'inventario' ? 'Inventario' : 'Reportes'}</h1></div>
-      <select id="branch" aria-label="Sucursal activa">${state.branches.map(branch => `<option value="${branch.id}" ${branch.id === state.branch?.id ? 'selected' : ''}>${esc(branch.name)} · ${esc(branch.code)}</option>`).join('')}</select></div>
-      <nav class="tabs"><button class="${state.view === 'meseros' ? 'active' : ''}" data-view="meseros">Meseros</button><button class="${state.view === 'cocina' ? 'active' : ''}" data-view="cocina">Cocina</button><button class="${state.view === 'inventario' ? 'active' : ''}" data-view="inventario">Inventario</button><button class="${state.view === 'caja' ? 'active' : ''}" data-view="caja">Caja</button><button class="${state.view === 'reportes' ? 'active' : ''}" data-view="reportes">Reportes</button></nav>
+    <main><div class="page-heading"><div><p class="eyebrow">${state.view === 'meseros' ? 'Sala y pedidos' : state.view === 'cocina' ? 'Producción' : state.view === 'caja' ? 'Cobros y turno' : state.view === 'inventario' ? 'Inventario y recetas' : state.view === 'sucursales' ? 'Estructura y horarios' : 'Consulta operativa'}</p><h1>${state.view === 'meseros' ? 'Toma de pedidos' : state.view === 'cocina' ? 'Cocina' : state.view === 'caja' ? 'Caja' : state.view === 'inventario' ? 'Inventario' : state.view === 'sucursales' ? 'Sucursales' : 'Reportes'}</h1></div>
+      <div class="branch-actions"><span class="branch-badge ${state.branchOpen ? 'open' : 'closed'}"><i></i>${state.branchOpen ? 'Abierta ahora' : 'Cerrada ahora'}</span><select id="branch" aria-label="Sucursal activa">${state.branches.map(branch => `<option value="${branch.id}" ${branch.id === state.branch?.id ? 'selected' : ''}>${esc(branch.name)} · ${esc(branch.code)}</option>`).join('')}</select></div></div>
+      <nav class="tabs"><button class="${state.view === 'meseros' ? 'active' : ''}" data-view="meseros">Meseros</button><button class="${state.view === 'cocina' ? 'active' : ''}" data-view="cocina">Cocina</button><button class="${state.view === 'inventario' ? 'active' : ''}" data-view="inventario">Inventario</button><button class="${state.view === 'caja' ? 'active' : ''}" data-view="caja">Caja</button><button class="${state.view === 'reportes' ? 'active' : ''}" data-view="reportes">Reportes</button><button class="${state.view === 'sucursales' ? 'active' : ''}" data-view="sucursales">Sucursales</button></nav>
       ${state.error ? `<div class="alert error">${esc(state.error)}<button id="clear-error" aria-label="Cerrar error">×</button></div>` : ''}
-      ${state.view === 'meseros' ? waiterView() : state.view === 'cocina' ? kitchenView() : state.view === 'caja' ? cashView() : state.view === 'inventario' ? inventoryView() : reportsView()}
+      ${state.view === 'meseros' ? waiterView() : state.view === 'cocina' ? kitchenView() : state.view === 'caja' ? cashView() : state.view === 'inventario' ? inventoryView() : state.view === 'sucursales' ? sucursalesView() : reportsView()}
     </main></div>`;
   bindCommon();
-  if (state.view === 'meseros') bindWaiter(); else if (state.view === 'cocina') bindKitchen(); else if (state.view === 'caja') bindCash(); else if (state.view === 'inventario') bindInventory(); else bindReports();
+  if (state.view === 'meseros') bindWaiter(); else if (state.view === 'cocina') bindKitchen(); else if (state.view === 'caja') bindCash(); else if (state.view === 'inventario') bindInventory(); else if (state.view === 'sucursales') bindSucursales(); else bindReports();
 }
 
 function renderLogin(): void { root.innerHTML = `<main class="login-page"><section class="login-art"><span class="brand-mark">G</span><p class="eyebrow">Operación multisucursal</p><h1>El servicio empieza aquí.</h1><p>Pedidos claros, cocina sincronizada y una operación que sigue el ritmo de tu equipo.</p></section><section class="login-panel"><div><p class="eyebrow">Bienvenido</p><h2>Iniciar sesión</h2><p class="muted">Usa tu cuenta autorizada para continuar.</p></div><form id="login-form"><label>Correo electrónico<input name="email" type="email" autocomplete="username" required placeholder="tu@restaurante.mx"></label><label>Contraseña<input name="password" type="password" autocomplete="current-password" required></label><button class="primary wide" type="submit" ${state.loading ? 'disabled' : ''}>${state.loading ? 'Entrando…' : 'Entrar a la operación'}</button></form>${state.error ? `<div class="alert error">${esc(state.error)}</div>` : ''}<p class="login-note">Sesión protegida con cookie segura.</p></section></main>`;
   document.querySelector<HTMLFormElement>('#login-form')!.onsubmit = async event => { event.preventDefault(); const form = new FormData(event.currentTarget as HTMLFormElement); setBusy(true); try { await api('/api/v1/auth/login', { method: 'POST', body: JSON.stringify({ email: form.get('email'), password: form.get('password') }) }); await loadSession(); } catch (error) { state.loading = false; showError(error); } };
 }
 
-function waiterView(): string { const categories = [...new Set(state.menu.map(product => product.category_name))]; return `<div class="workspace"><section class="menu-panel"><div class="section-head"><div><h2>Menú disponible</h2><p class="muted">Toca un artículo para agregarlo al pedido.</p></div><span class="count">${state.menu.length} artículos</span></div>${state.menu.length ? categories.map(category => `<div class="category"><h3>${esc(category)}</h3><div class="product-grid">${state.menu.filter(product => product.category_name === category).map(product => `<article class="product ${!product.is_available ? 'disabled' : ''}"><div><h4>${esc(product.name)}</h4><p>${esc(product.description || 'Preparado al momento')}</p></div><div class="product-bottom"><span>${product.is_available ? money(product.variants[0]?.price || 0) : 'Agotado'}</span><button class="add" data-product="${product.id}" ${product.is_available ? '' : 'disabled'} aria-label="Agregar ${esc(product.name)}">+</button></div></article>`).join('')}</div></div>`).join('') : '<div class="empty"><strong>Menú no disponible</strong><p>Selecciona una sucursal con catálogo activo.</p></div>'}</section><aside class="order-panel"><div class="section-head"><div><p class="eyebrow">Nueva comanda</p><h2>Pedido actual</h2></div><span class="order-status">Borrador</span></div><label class="compact-label">Mesa<select id="table"><option value="">Para llevar</option>${state.tables.filter(table => table.status !== 'DISABLED').map(table => `<option value="${table.id}">${esc(table.name)} · ${table.capacity} lugares</option>`).join('')}</select></label><div class="cart">${state.cart.length ? state.cart.map((line, index) => `<div class="cart-line"><div><strong>${esc(line.product.name)}</strong><small>${esc(line.variant.name)} · ${money(line.variant.price)}</small></div><div class="quantity"><button data-cart="${index}" data-change="-1">−</button><b>${line.quantity}</b><button data-cart="${index}" data-change="1">+</button></div></div>`).join('') : '<div class="empty cart-empty"><span>＋</span><strong>Tu pedido está vacío</strong><p>Agrega artículos del menú.</p></div>'}</div><div class="order-total"><span>Total estimado</span><strong>${money(total())}</strong></div><button class="primary wide" id="send-order" ${state.cart.length && !state.loading ? '' : 'disabled'}>${state.loading ? 'Enviando…' : 'Confirmar y enviar a cocina'}</button></aside></div>`; }
+function waiterView(): string { const categories = [...new Set(state.menu.map(product => product.category_name))]; const available = (product: Product): boolean => product.available_now ?? product.is_available; return `<div class="workspace"><section class="menu-panel"><div class="section-head"><div><h2>Menú disponible</h2><p class="muted">Toca un artículo para agregarlo al pedido.</p></div><span class="count">${state.menu.length} artículos</span></div>${state.branchOpen === false ? '<div class="alert notice"><strong>Sucursal cerrada</strong><span>No se pueden agregar productos ni enviar comandas hasta que el horario de atención lo permita.</span></div>' : ''}${state.menu.length ? categories.map(category => `<div class="category"><h3>${esc(category)}</h3><div class="product-grid">${state.menu.filter(product => product.category_name === category).map(product => `<article class="product ${!available(product) ? 'disabled' : ''}"><div><h4>${esc(product.name)}</h4><p>${esc(product.description || 'Preparado al momento')}</p></div><div class="product-bottom"><span>${available(product) ? money(product.variants[0]?.price || 0) : (product.is_available ? 'Fuera de horario' : 'Agotado')}</span><button class="add" data-product="${product.id}" ${available(product) ? '' : 'disabled'} aria-label="Agregar ${esc(product.name)}">+</button></div></article>`).join('')}</div></div>`).join('') : '<div class="empty"><strong>Menú no disponible</strong><p>Selecciona una sucursal con catálogo activo.</p></div>'}</section><aside class="order-panel"><div class="section-head"><div><p class="eyebrow">Nueva comanda</p><h2>Pedido actual</h2></div><span class="order-status">Borrador</span></div><label class="compact-label">Mesa<select id="table"><option value="">Para llevar</option>${state.tables.filter(table => table.status !== 'DISABLED').map(table => `<option value="${table.id}">${esc(table.name)} · ${table.capacity} lugares</option>`).join('')}</select></label><div class="cart">${state.cart.length ? state.cart.map((line, index) => `<div class="cart-line"><div><strong>${esc(line.product.name)}</strong><small>${esc(line.variant.name)} · ${money(line.variant.price)}</small></div><div class="quantity"><button data-cart="${index}" data-change="-1">−</button><b>${line.quantity}</b><button data-cart="${index}" data-change="1">+</button></div></div>`).join('') : '<div class="empty cart-empty"><span>＋</span><strong>Tu pedido está vacío</strong><p>Agrega artículos del menú.</p></div>'}</div><div class="order-total"><span>Total estimado</span><strong>${money(total())}</strong></div><button class="primary wide" id="send-order" ${state.cart.length && !state.loading ? '' : 'disabled'}>${state.loading ? 'Enviando…' : 'Confirmar y enviar a cocina'}</button></aside></div>`; }
 
 function kitchenView(): string { return `<section class="kitchen-view"><div class="section-head"><div><h2>Comandas pendientes</h2><p class="muted">Actualización automática cada 15 segundos.</p></div><button class="secondary" id="refresh-kitchen">↻ Actualizar</button></div>${state.kitchenPending ? '<div class="empty"><strong>El módulo de cocina está pendiente</strong><p>La API actual no expone una acción separada de aceptar. Consulta el contrato en el README.</p></div>' : state.kitchen.length ? `<div class="ticket-grid">${state.kitchen.map(ticket => { const status = ticket.kitchen_status || ''; return `<article class="ticket"><div class="ticket-top"><strong>#${esc(ticket.folio || ticket.id.slice(0, 6))}</strong><span>${esc(status)}</span></div><small>${ticket.created_at ? new Date(ticket.created_at).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' }) : ''}</small><ul>${(ticket.items || []).map(item => `<li><b>${item.quantity}×</b> ${esc(item.product_name)} ${esc(item.variant_name || '')}</li>`).join('')}</ul><div class="ticket-actions">${status === 'PENDING' ? `<button class="primary" data-kitchen="start" data-id="${ticket.id}">Iniciar</button>` : ''}${status === 'IN_PROGRESS' ? `<button class="primary" data-kitchen="ready" data-id="${ticket.id}">Marcar listo</button>` : ''}</div></article>`; }).join('')}</div>` : '<div class="empty"><strong>Todo al día</strong><p>No hay comandas pendientes en esta sucursal.</p></div>'}</section>`; }
 
@@ -647,7 +647,7 @@ async function consultCashOrder(): Promise<void> { const id = (document.querySel
 async function chargeOrder(): Promise<void> { if (!state.cash || !state.selectedOrder) return; const payments = (['CASH', 'CARD', 'TRANSFER'] as const).map(method => ({ method, amount: Number((document.querySelector(`[name="${method}"]`) as HTMLInputElement).value || 0) })).filter(payment => payment.amount > 0); const requested = payments.reduce((sum, payment) => sum + payment.amount, 0); const pending = Number(state.selectedOrder.total) - Number(state.selectedOrder.paid); if (!payments.length || requested > pending) { state.error = requested > pending ? 'El pago excede el pendiente' : 'Captura al menos un importe'; render(); return; } setBusy(true); try { let totalPaid = Number(state.selectedOrder.paid); let change = 0; for (const payment of payments) { const result = await api<{ data: { amount: number; change_amount: number } }>(`/api/v1/orders/${state.selectedOrder.id}/payments`, { method: 'POST', body: JSON.stringify({ method: payment.method, amount: payment.amount, ...(payment.method === 'CASH' ? { cashReceived: payment.amount } : {}), idempotencyKey: `web-cash-${state.selectedOrder.id}-${payment.method}-${crypto.randomUUID()}` }) }); totalPaid += Number(result.data.amount); change += Number(result.data.change_amount || 0); } state.receipt = { orderId: state.selectedOrder.id, totalPaid, pending: Number(state.selectedOrder.total) - totalPaid, change }; state.selectedOrder = undefined; await loadCash(); } catch (error) { showError(error); } }
 async function closeCash(event: Event): Promise<void> { event.preventDefault(); if (!state.cash) return; const form = new FormData(event.currentTarget as HTMLFormElement); setBusy(true); try { await api(`/api/v1/cash-sessions/${state.cash.id}/close`, { method: 'POST', body: JSON.stringify({ countedCash: Number(form.get('countedCash')), closingNote: form.get('closingNote') || undefined }) }); state.cash = undefined; state.movements = []; state.cashOrders = []; state.selectedOrder = undefined; state.loading = false; render(); } catch (error) { showError(error); } }
 
-function bindCommon(): void { document.querySelector('#logout')!.addEventListener('click', async () => { await api('/api/v1/auth/logout', { method: 'POST' }).catch(() => undefined); state.user = undefined; render(); }); document.querySelectorAll<HTMLButtonElement>('[data-view]').forEach(button => button.onclick = () => { state.view = button.dataset.view as 'meseros' | 'cocina' | 'caja' | 'reportes' | 'inventario'; render(); if (state.view === 'caja') loadCash(); else if (state.view === 'inventario') loadInventory(); else loadBranchData(); }); document.querySelector<HTMLSelectElement>('#branch')!.onchange = event => { state.branch = state.branches.find(branch => branch.id === (event.target as HTMLSelectElement).value); if (state.view === 'caja') { loadCash(); loadBranchData(); } else if (state.view === 'inventario') { state.inventory.warehouseId = ''; state.inventory.count = undefined; state.inventory.movements = []; loadInventory(); } else loadBranchData(); }; document.querySelector('#clear-error')?.addEventListener('click', () => { state.error = ''; render(); }); }
+function bindCommon(): void { document.querySelector('#logout')!.addEventListener('click', async () => { await api('/api/v1/auth/logout', { method: 'POST' }).catch(() => undefined); state.user = undefined; render(); }); document.querySelectorAll<HTMLButtonElement>('[data-view]').forEach(button => button.onclick = () => { state.view = button.dataset.view as 'meseros' | 'cocina' | 'caja' | 'reportes' | 'inventario' | 'sucursales'; render(); if (state.view === 'caja') loadCash(); else if (state.view === 'inventario') loadInventory(); else if (state.view === 'sucursales') loadSucursales(); else loadBranchData(); }); document.querySelector<HTMLSelectElement>('#branch')!.onchange = event => { state.branch = state.branches.find(branch => branch.id === (event.target as HTMLSelectElement).value); if (state.view === 'caja') { loadCash(); loadBranchData(); } else if (state.view === 'inventario') { state.inventory.warehouseId = ''; state.inventory.count = undefined; state.inventory.movements = []; loadInventory(); } else if (state.view === 'sucursales') { state.inventory.warehouseId = ''; state.inventory.count = undefined; state.inventory.movements = []; loadSucursales(); } else loadBranchData(); }; document.querySelector('#clear-error')?.addEventListener('click', () => { state.error = ''; render(); }); }
 function bindWaiter(): void { document.querySelectorAll<HTMLButtonElement>('[data-product]').forEach(button => button.onclick = () => { const product = state.menu.find(item => item.id === button.dataset.product)!; const variant = product.variants[0]; const line = state.cart.find(item => item.product.id === product.id && item.variant.id === variant.id); if (line) line.quantity++; else state.cart.push({ product, variant, quantity: 1 }); render(); }); document.querySelectorAll<HTMLButtonElement>('[data-cart]').forEach(button => button.onclick = () => { const index = Number(button.dataset.cart); state.cart[index].quantity += Number(button.dataset.change); if (state.cart[index].quantity < 1) state.cart.splice(index, 1); render(); }); document.querySelector('#send-order')?.addEventListener('click', sendOrder); }
 async function sendOrder(): Promise<void> {
   if (!state.branch || !state.cart.length) return;
@@ -684,7 +684,125 @@ async function loadKitchen(): Promise<void> { if (!state.branch) return; try { c
 function connectKitchenStream(): void { kitchenStream?.close(); if (!state.branch || state.view !== 'cocina') return; kitchenStream = new EventSource(`/api/v1/branches/${state.branch.id}/kitchen/events`); const refresh = () => loadKitchen(); kitchenStream.addEventListener('order.sent_to_kitchen', refresh); kitchenStream.addEventListener('order.kitchen_status_changed', refresh); kitchenStream.onmessage = refresh; kitchenStream.onerror = () => { kitchenStream?.close(); kitchenStream = undefined; }; }
 async function changeKitchen(action: string, id: string): Promise<void> { try { await api(`/api/v1/kitchen/orders/${id}/${action}`, { method: 'POST', body: JSON.stringify({ idempotencyKey: `web-kitchen-${id}-${action}-${crypto.randomUUID()}` }) }); await loadKitchen(); } catch (error) { showError(error); } }
 async function loadSession(): Promise<void> { try { const result = await api<{ user: User }>('/api/v1/auth/me'); state.user = result.user; state.loading = false; const branches = await api<{ data: Branch[] }>('/api/v1/branches'); state.branches = branches.data; state.branch = state.branches[0]; state.connected = true; render(); await loadBranchData(); } catch (error) { state.loading = false; showError(error); } }
-async function loadBranchData(): Promise<void> { if (!state.branch) return; setBusy(true); try { const [menu, tables] = await Promise.all([api<{ data: Product[] }>(`/api/v1/branches/${state.branch.id}/menu`), api<{ data: Table[] }>(`/api/v1/branches/${state.branch.id}/tables`)]); state.menu = menu.data; state.tables = tables.data; state.connected = true; state.loading = false; render(); if (state.view === 'cocina') { loadKitchen(); connectKitchenStream(); } if (state.view === 'reportes') loadReport(); } catch (error) { state.loading = false; showError(error); } }
+async function loadBranchData(): Promise<void> { if (!state.branch) return; setBusy(true); try { const [menu, tables] = await Promise.all([api<{ data: Product[]; openNow?: boolean }>(`/api/v1/branches/${state.branch.id}/menu`), api<{ data: Table[] }>(`/api/v1/branches/${state.branch.id}/tables`)]); state.menu = menu.data; state.branchOpen = menu.openNow ?? true; state.tables = tables.data; state.connected = true; state.loading = false; render(); if (state.view === 'cocina') { loadKitchen(); connectKitchenStream(); } if (state.view === 'reportes') loadReport(); } catch (error) { state.loading = false; showError(error); } }
+
+const DAY_LABELS = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+
+function sucursalesView(): string {
+  return `<section class="suc-view"><div class="section-head"><div><p class="eyebrow">Administración</p><h2>Estructura multisucursal</h2><p class="muted">Crea sucursales, define su horario de atención y las ventanas de disponibilidad de cada producto.</p></div>${state.suc.pending ? '<span class="order-status">Cargando…</span>' : ''}</div>
+    <article class="suc-card"><h3>Nueva sucursal</h3><form id="suc-new"><div class="suc-grid"><label>Nombre<input name="name" required maxlength="160" placeholder="Sucursal Centro"></label><label>Código<input name="code" required maxlength="40" pattern="[A-Za-z0-9_.-]+" placeholder="CENTRO"></label></div><div class="suc-grid"><label>Dirección<input name="address" maxlength="300" placeholder="Calle y número"></label><label>Zona horaria<input name="timezone" maxlength="80" value="America/Mexico_City"></label></div><button class="primary" type="submit">Crear sucursal</button></form></article>
+    ${state.suc.branches.map(branch => hoursEditor(branch)).join('')}
+    <article class="suc-card"><h3>Disponibilidad por producto</h3><p class="muted">Sin ventanas el producto se ofrece todo el día según su estado en la sucursal.</p><div class="suc-grid"><label>Sucursal<select id="suc-product-branch">${state.suc.branches.map(branch => `<option value="${branch.id}" ${branch.id === (state.suc.windowBranch || state.branch?.id) ? 'selected' : ''}>${esc(branch.name)} · ${esc(branch.code)}</option>`).join('')}</select></label><label>Producto<select id="suc-product">${state.suc.products.map(product => `<option value="${product.id}" ${product.id === state.suc.windowProduct ? 'selected' : ''}>${esc(product.name)}</option>`).join('')}</select></label></div>
+    <div>${state.suc.windows.length ? state.suc.windows.map((window, index) => `<div class="window-row"><span class="day-label">${DAY_LABELS[window.day]}</span><input type="time" value="${window.from}" data-window-from="${index}"><span>–</span><input type="time" value="${window.to}" data-window-to="${index}"><button class="ghost small" data-window-remove="${index}">Quitar</button></div>`).join('') : '<p class="muted">Sin ventanas definidas.</p>'}</div>
+    <div class="window-add"><select id="suc-window-day">${DAY_LABELS.map((label, day) => `<option value="${day}">${label}</option>`).join('')}</select><input type="time" id="suc-window-from"><span>–</span><input type="time" id="suc-window-to"><button class="secondary" id="suc-window-add">Agregar ventana</button></div>
+    <button class="primary" id="suc-windows-save" ${state.suc.windowBranch && state.suc.windowProduct ? '' : 'disabled'}>Guardar disponibilidad</button></article>
+  </section>`;
+}
+
+function hoursEditor(branch: Branch): string {
+  const rows = state.suc.hours[branch.id] ?? [];
+  const rowFor = (day: number) => rows.find(item => item.day === day);
+  return `<article class="suc-card"><div class="suc-card-head"><div><h3>${esc(branch.name)} · ${esc(branch.code)}</h3><p class="muted">${esc(branch.address || 'Sin dirección')} · ${esc(branch.timezone || 'America/Mexico_City')}</p></div><span class="order-status ${branch.is_active === false ? 'disabled' : ''}">${branch.is_active === false ? 'Inactiva' : 'Activa'}</span></div>
+    <div class="hours-editor" data-branch-hour="${branch.id}">${DAY_LABELS.map((label, day) => { const row = rowFor(day); return `<div class="hours-row"><span class="day-label">${label}</span><label class="toggle"><input type="checkbox" data-day-open="${day}" ${row ? 'checked' : ''}> Abierta</label><input type="time" data-day-from="${day}" value="${row ? row.from : '09:00'}"><span>–</span><input type="time" data-day-to="${day}" value="${row ? row.to : '18:00'}"></div>`; }).join('')}</div>
+    <p class="hint">Sin días marcados la sucursal atiende todo el día.</p>
+    <button class="primary" data-save-hours="${branch.id}">Guardar horario</button></article>`;
+}
+
+function bindSucursales(): void {
+  document.querySelector<HTMLFormElement>('#suc-new')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget as HTMLFormElement);
+    setBusy(true);
+    try {
+      await api('/api/v1/branches', { method: 'POST', body: JSON.stringify({ name: form.get('name'), code: form.get('code'), address: form.get('address') || undefined, timezone: form.get('timezone') }) });
+      state.error = ''; state.loading = false; render();
+      await loadSucursales();
+    } catch (error) { state.loading = false; showError(error); }
+  });
+  document.querySelectorAll<HTMLButtonElement>('[data-save-hours]').forEach(button => button.onclick = async () => { await saveBranchHours(button.dataset.saveHours!); });
+  document.querySelector<HTMLSelectElement>('#suc-product-branch')?.addEventListener('change', () => loadWindowsFromSelects());
+  document.querySelector<HTMLSelectElement>('#suc-product')?.addEventListener('change', () => loadWindowsFromSelects());
+  document.querySelector('#suc-window-add')?.addEventListener('click', () => {
+    const day = Number((document.querySelector('#suc-window-day') as HTMLSelectElement).value);
+    const from = (document.querySelector('#suc-window-from') as HTMLInputElement).value;
+    const to = (document.querySelector('#suc-window-to') as HTMLInputElement).value;
+    if (!from || !to) { showError(new Error('Indica hora de inicio y fin de la ventana')); return; }
+    if (from >= to) { showError(new Error('La ventana debe terminar después de iniciar')); return; }
+    state.suc.windows.push({ day, from, to });
+    render(); bindSucursales();
+  });
+  document.querySelectorAll<HTMLButtonElement>('[data-window-remove]').forEach(button => button.onclick = () => { state.suc.windows.splice(Number(button.dataset.windowRemove), 1); render(); bindSucursales(); });
+  document.querySelectorAll<HTMLInputElement>('[data-window-from], [data-window-to]').forEach(input => input.onchange = () => {
+    const index = Number(input.dataset.windowFrom ?? input.dataset.windowTo);
+    state.suc.windows[index] = { ...state.suc.windows[index], from: (document.querySelector(`[data-window-from="${index}"]`) as HTMLInputElement).value || state.suc.windows[index].from, to: (document.querySelector(`[data-window-to="${index}"]`) as HTMLInputElement).value || state.suc.windows[index].to };
+  });
+  document.querySelector('#suc-windows-save')?.addEventListener('click', async () => {
+    if (!state.suc.windowBranch || !state.suc.windowProduct) return;
+    try {
+      const windows = state.suc.windows.map((window, index) => ({ ...window, from: (document.querySelector(`[data-window-from="${index}"]`) as HTMLInputElement)?.value || window.from, to: (document.querySelector(`[data-window-to="${index}"]`) as HTMLInputElement)?.value || window.to }));
+      await api(`/api/v1/branches/${state.suc.windowBranch}/products/${state.suc.windowProduct}/hours`, { method: 'PUT', body: JSON.stringify({ windows }) });
+      state.error = ''; render();
+      await loadSucursales();
+    } catch (error) { showError(error); }
+  });
+}
+
+async function loadWindowsFromSelects(): Promise<void> {
+  const branchId = (document.querySelector('#suc-product-branch') as HTMLSelectElement).value;
+  const productId = (document.querySelector('#suc-product') as HTMLSelectElement).value;
+  if (!branchId || !productId) return;
+  state.suc.windowBranch = branchId;
+  state.suc.windowProduct = productId;
+  try {
+    const result = await api<{ data: { day_of_week: number; time_from: string; time_to: string }[] }>(`/api/v1/branches/${branchId}/products/${productId}/hours`);
+    state.suc.windows = result.data.map(row => ({ day: row.day_of_week, from: row.time_from, to: row.time_to }));
+    render(); bindSucursales();
+    document.querySelector<HTMLSelectElement>('#suc-product-branch')!.value = branchId;
+    document.querySelector<HTMLSelectElement>('#suc-product')!.value = productId;
+  } catch (error) { showError(error); }
+}
+
+async function saveBranchHours(branchId: string): Promise<void> {
+  const hours: { day: number; from: string; to: string }[] = [];
+  for (let day = 0; day < 7; day += 1) {
+    const card = document.querySelector<HTMLElement>(`[data-branch-hour="${branchId}"]`);
+    if (!card) continue;
+    const open = (card.querySelector<HTMLInputElement>(`[data-day-open="${day}"]`)!).checked;
+    const from = (card.querySelector<HTMLInputElement>(`[data-day-from="${day}"]`)!).value;
+    const to = (card.querySelector<HTMLInputElement>(`[data-day-to="${day}"]`)!).value;
+    if (!open || !from || !to) continue;
+    if (from >= to) { showError(new Error('Cada día debe abrir antes de cerrar')); return; }
+    hours.push({ day, from, to });
+  }
+  try {
+    const result = await api<{ data: { hours: { day_of_week: number; time_from: string; time_to: string }[]; openNow: boolean } }>(`/api/v1/branches/${branchId}/hours`, { method: 'PUT', body: JSON.stringify({ hours }) });
+    state.suc.hours[branchId] = result.data.hours.map(row => ({ day: row.day_of_week, from: row.time_from, to: row.time_to }));
+    if (branchId === state.branch?.id) state.branchOpen = result.data.openNow;
+    state.error = ''; render();
+  } catch (error) { showError(error); }
+}
+
+async function loadSucursales(): Promise<void> {
+  state.suc = { ...state.suc, pending: true, error: '' };
+  render();
+  try {
+    const branches = await api<{ data: Branch[] }>('/api/v1/branches');
+    state.branches = branches.data;
+    const products = await api<{ data: { id: string; name: string }[] }>('/api/v1/products');
+    const bonus: Record<string, { day: number; from: string; to: string }[]> = {};
+    for (const branch of branches.data) {
+      const hours = await api<{ data: { hours: { day_of_week: number; time_from: string; time_to: string }[] } }>(`/api/v1/branches/${branch.id}/hours`);
+      bonus[branch.id] = hours.data.hours.map(row => ({ day: row.day_of_week, from: row.time_from, to: row.time_to }));
+    }
+    state.suc = { ...state.suc, branches: branches.data, products: products.data, hours: bonus, pending: false, error: '' };
+    if (state.suc.windowBranch) {
+      const windowsBranch = await api<{ data: { day_of_week: number; time_from: string; time_to: string }[] }>(`/api/v1/branches/${state.suc.windowBranch}/products/${state.suc.windowProduct}/hours`);
+      state.suc.windows = windowsBranch.data.map(row => ({ day: row.day_of_week, from: row.time_from, to: row.time_to }));
+    }
+    state.connected = true;
+    render();
+  } catch (error) { state.suc = { ...state.suc, pending: false, error: error instanceof Error ? error.message : 'Error de carga' }; state.loading = false; showError(error); }
+}
 window.addEventListener('online', () => { state.connected = true; render(); }); window.addEventListener('offline', () => { state.connected = false; render(); });
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => undefined);
 render(); loadSession();

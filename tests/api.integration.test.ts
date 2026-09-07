@@ -11,7 +11,7 @@ let cookieBody = '';
 
 type InjectResult = { status: number; json: any; headers: import('node:http').OutgoingHttpHeaders };
 
-type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE';
+type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 
 async function call(cookie: string, method: HttpMethod, url: string, body?: unknown): Promise<InjectResult> {
   const headers: Record<string, string> = { cookie };
@@ -781,5 +781,124 @@ describe('compras y proveedores', () => {
     const entry = costs.json.data[0];
     expect(Number(entry.last_price)).toBe(16);
     expect(Number(entry.average_cost_per_base_unit)).toBeCloseTo(15, 4);
+  });
+});
+describe('fase 10: sucursales, horarios y disponibilidad', () => {
+  let newBranchId: string;
+  const DAYS = [0, 1, 2, 3, 4, 5, 6];
+  const DAY_MAP_LOCAL: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+
+  function today(): number {
+    const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Mexico_City', weekday: 'short' }).formatToParts(new Date());
+    return DAY_MAP_LOCAL[parts.find(p => p.type === 'weekday')!.value];
+  }
+
+  function openHours() {
+    return DAYS.map(day => ({ day, from: '00:00', to: '23:59' }));
+  }
+
+  function closedToday() {
+    return DAYS.filter(day => day !== today()).map(day => ({ day, from: '00:00', to: '23:59' }));
+  }
+
+  async function setHours(branchId: string, hours: unknown) {
+    return call(adminCookie, 'PUT', `/api/v1/branches/${branchId}/hours`, { hours });
+  }
+
+  it('crea sucursales con sus secuencias y rechaza duplicados', async () => {
+    const limited = await login('limitado@prueba.local', env.password);
+    const forbidden = await call(limited, 'POST', '/api/v1/branches', { name: 'No autorizada', code: 'NOPE' });
+    expect(forbidden.status).toBe(403);
+
+    const created = await call(adminCookie, 'POST', '/api/v1/branches', { name: 'Sucursal nueva', code: 'NUEVA', address: 'Av. Central 1', timezone: 'America/Mexico_City' });
+    expect(created.status).toBe(201);
+    newBranchId = created.json.data.id;
+
+    const duplicate = await call(adminCookie, 'POST', '/api/v1/branches', { name: 'Otra', code: 'NUEVA' });
+    expect(duplicate.status).toBe(409);
+
+    const list = await call(adminCookie, 'GET', '/api/v1/branches');
+    expect(list.json.data.some((b: { id: string }) => b.id === newBranchId)).toBe(true);
+
+    await pool.query('INSERT INTO user_branches (user_id, branch_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [env.userId, newBranchId]);
+    const order = await call(adminCookie, 'POST', '/api/v1/orders', { branchId: newBranchId, channel: 'TAKEOUT', idempotencyKey: `fase10-${crypto.randomUUID()}` });
+    expect(order.status).toBe(201);
+    expect(Number(order.json.data.folio)).toBe(1);
+  });
+
+  it('gestiona horarios y expone el estado abierta/cerrada, aislado por permisos', async () => {
+    await setHours(env.branchId, closedToday());
+    let res = await call(adminCookie, 'GET', `/api/v1/branches/${env.branchId}/hours`);
+    expect(res.status).toBe(200);
+    expect(res.json.data.openNow).toBe(false);
+    expect(res.json.data.hours.length).toBe(6);
+
+    await setHours(env.branchId, openHours());
+    res = await call(adminCookie, 'GET', `/api/v1/branches/${env.branchId}/hours`);
+    expect(res.json.data.openNow).toBe(true);
+
+    const invalid = await call(adminCookie, 'PUT', `/api/v1/branches/${env.branchId}/hours`, { hours: [{ day: today(), from: '23:00', to: '10:00' }] });
+    expect(invalid.status).toBe(400);
+
+    const limited = await login('limitado@prueba.local', env.password);
+    const denied = await call(limited, 'PUT', `/api/v1/branches/${env.branchTwoId}/hours`, { hours: openHours() });
+    expect(denied.status).toBe(403);
+    const deniedRead = await call(limited, 'GET', `/api/v1/branches/${env.branchId}/hours`);
+    expect(deniedRead.status).toBe(403);
+  });
+
+  it('bloquea agregar detalles con la sucursal cerrada sin afectar otras sucursales', async () => {
+    await setHours(env.branchId, closedToday());
+    const draft = await call(adminCookie, 'POST', '/api/v1/orders', { branchId: env.branchId, channel: 'TAKEOUT', idempotencyKey: `cerrada-${crypto.randomUUID()}` });
+    expect(draft.status).toBe(201);
+    const item = await call(adminCookie, 'POST', `/api/v1/orders/${draft.json.data.id}/items`, { productId: env.productId, variantId: env.variantId, quantity: 1 });
+    expect(item.status).toBe(409);
+    expect(item.json.error).toContain('cerrada');
+
+    const keyTwo = `cerrada-${crypto.randomUUID()}`;
+    const orderTwo = await call(adminCookie, 'POST', '/api/v1/orders', { branchId: env.branchTwoId, channel: 'TAKEOUT', idempotencyKey: keyTwo });
+    const itemTwo = await call(adminCookie, 'POST', `/api/v1/orders/${orderTwo.json.data.id}/items`, { productId: env.productId, variantId: env.variantId, quantity: 1 });
+    expect(itemTwo.status).toBe(201);
+
+    await setHours(env.branchId, openHours());
+  });
+
+  it('bloquea el envio a cocina con la sucursal cerrada', async () => {
+    await setHours(env.branchId, openHours());
+    const { id } = await createOrder();
+    const confirmed = await call(adminCookie, 'POST', `/api/v1/orders/${id}/confirm`);
+    expect(confirmed.status).toBe(200);
+    await setHours(env.branchId, closedToday());
+    const sent = await call(adminCookie, 'POST', `/api/v1/orders/${id}/send-to-kitchen`, { idempotencyKey: `cerrada-${crypto.randomUUID()}` });
+    expect(sent.status).toBe(409);
+    expect(sent.json.error).toContain('cerrada');
+    await setHours(env.branchId, openHours());
+  });
+
+  it('aplica ventanas de disponibilidad por producto y las aisla por sucursal', async () => {
+    await setHours(env.branchId, openHours());
+    const windows = await call(adminCookie, 'PUT', `/api/v1/branches/${env.branchId}/products/${env.productId}/hours`, { windows: closedToday() });
+    expect(windows.status).toBe(200);
+
+    const got = await call(adminCookie, 'GET', `/api/v1/branches/${env.branchId}/products/${env.productId}/hours`);
+    expect(got.status).toBe(200);
+    expect(got.json.data.length).toBe(6);
+
+    const menuOne = await call(adminCookie, 'GET', `/api/v1/branches/${env.branchId}/menu`);
+    expect(menuOne.json.data.find((p: { id: string }) => p.id === env.productId).available_now).toBe(false);
+    const menuTwo = await call(adminCookie, 'GET', `/api/v1/branches/${env.branchTwoId}/menu`);
+    expect(menuTwo.json.data.find((p: { id: string }) => p.id === env.productId).available_now).toBe(true);
+
+    const draft = await call(adminCookie, 'POST', '/api/v1/orders', { branchId: env.branchId, channel: 'TAKEOUT', idempotencyKey: `ventana-${crypto.randomUUID()}` });
+    const item = await call(adminCookie, 'POST', `/api/v1/orders/${draft.json.data.id}/items`, { productId: env.productId, variantId: env.variantId, quantity: 1 });
+    expect(item.status).toBe(409);
+    expect(item.json.error).toContain('horario');
+
+    const invalid = await call(adminCookie, 'PUT', `/api/v1/branches/${env.branchId}/products/${env.productId}/hours`, { windows: [{ day: today(), from: '10:00', to: '09:00' }] });
+    expect(invalid.status).toBe(400);
+
+    await call(adminCookie, 'PUT', `/api/v1/branches/${env.branchId}/products/${env.productId}/hours`, { windows: [] });
+    const after = await call(adminCookie, 'GET', `/api/v1/branches/${env.branchId}/menu`);
+    expect(after.json.data.find((p: { id: string }) => p.id === env.productId).available_now).toBe(true);
   });
 });

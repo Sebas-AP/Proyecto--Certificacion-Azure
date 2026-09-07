@@ -19,6 +19,7 @@ const MIGRATIONS = [
   '007_inventory_consumption.sql',
   '008_purchasing.sql',
   '009_purchasing_returns.sql',
+  '010_branch_scheduling.sql',
 ];
 
 export async function migrate(): Promise<void> {

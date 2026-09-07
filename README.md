@@ -15,11 +15,15 @@ Implementada la Fase 0 y el primer núcleo de la Fase 1:
 
 Fase 2 implementada: catálogo, mesas y pedidos. La primera interfaz operativa de Fase 3 vive en `apps/web`: meseros, sesión por cookie, pedidos enviados a cocina y una vista de cocina preparada para su contrato de tickets. Caja, pagos, inventario, mensajería e IA siguen fuera de alcance.
 
-El seed demo es idempotente. Con `SEED_ADMIN_PASSWORD` crea o actualiza la empresa `Empresa de demostracion`, la sucursal `Sucursal piloto` (`PILOTO`), el usuario `admin@demo.local` y su rol Administrador con todos los permisos disponibles. También crea la categoría `Gorditas`, tres productos demo con dos variantes y precios vigentes cada uno, disponibilidad en la sucursal, cuatro mesas disponibles, una caja principal, los métodos de pago efectivo, tarjeta y transferencia, y ahora inventario inicial: un almacén principal, cuatro ingredientes (masa, chicharrón, salsa y queso) con compra inicial, y la receta `Gordita de chicharron` v1. No crea pedidos, pagos, turnos ni otros datos históricos.
+El seed demo es idempotente. Con `SEED_ADMIN_PASSWORD` crea o actualiza la empresa `Empresa de demostracion`, las sucursales `Sucursal piloto` (`PILOTO`) y `Sucursal Alameda` (`ALAMEDA`) con horario de atención 07:00–22:00 los 7 días (Alameda limita el frijol a 08:00–14:00), el usuario `admin@demo.local` y su rol Administrador con todos los permisos disponibles. También crea la categoría `Gorditas`, tres productos demo con dos variantes y precios vigentes cada uno, disponibilidad en ambas sucursales, mesas, una caja principal por sucursal, los métodos de pago efectivo, tarjeta y transferencia, e inventario inicial: un almacén principal, cuatro ingredientes (masa, chicharrón, salsa y queso) con compra inicial, y la receta `Gordita de chicharron` v1. No crea pedidos, pagos, turnos ni otros datos históricos.
 
 Fase 4 implementada: sesiones de caja, pagos mixtos en efectivo/tarjeta/transferencia, cierres, idempotencia, movimientos manuales `IN/OUT`, solicitudes/aprobaciones de reembolso y consulta de pedidos pendientes. No se almacenan datos de tarjetas.
 
 Fase 5 piloto implementada: reportes básicos de ventas y operación, con filtros UTC explícitos, aislamiento por empresa/sucursales autorizadas y exportación CSV auditada. La fase siguiente añade el núcleo backend de inventario y recetas; compras completas, WhatsApp e IA siguen fuera de alcance.
+
+Fase 6-8 implementadas: núcleo backend de inventario y recetas (productos/ingredientes/almacenes, recetas, consumos teóricos, transferencias, conversiones, conteos y catálogo de unidades), interfaz PWA de inventario y compras/proveedores (órdenes de compra, recepciones completas/parciales, devoluciones, diferencias de precio y costos promedio). Fase 9: la PWA quedó verificada de punta a punta con Playwright (6/6) e informe piloto.
+
+Fase 10 (núcleo técnico) implementada: incorporación de sucursales desde la API y la PWA (pestaña Sucursales), horarios de atención por sucursal (7 días, sin filas = 24/7) y ventanas de disponibilidad por producto, ambos con permiso `schedule.manage`. El menú reporta `openNow`/`available_now` y la operación bloquea (409) pedidos o envíos a cocina cuando la sucursal está cerrada o el producto está fuera de ventana.
 
 ## Requisitos
 
@@ -87,6 +91,17 @@ npm run dev:web
 Abre `http://localhost:5173`. Vite redirige `/api` y `/health` a la API en `http://localhost:4000`; las credenciales se envían con la cookie de sesión. Para levantar PostgreSQL, API y PWA en una sola orden usa `npm run dev:all` (requiere `.env` y Docker). El bundle de producción se genera con `npm run build:web` y el build completo con `npm run build:all`.
 
 La aplicación incluye `manifest.webmanifest` y un service worker base. El cache solo cubre el shell estático; las operaciones y datos de menú siempre requieren conexión para evitar pedidos desactualizados.
+
+### Pruebas E2E (Playwright)
+
+Requiere la API, la PWA (`npm run dev:web`) y PostgreSQL demo levantados, y Chromium del sistema (`/usr/bin/chromium`). Ejecutar dentro de la ventana de atención demo (07:00–22:00 hora local de la sucursal), porque desde la Fase 10 la sucursal bloquea pedidos fuera de horario.
+
+```bash
+npm run test:e2e        # suite mesero → cocina → caja → inventario → reportes
+npm run report:fase9    # genera reports/Fase9_Informe_Piloto_Operativo.docx con las capturas
+```
+
+El eje es `tests/e2e/flujo-operativo.spec.ts` (6 pruebas en serie): inicia sesión, toma un pedido, lo envía a cocina, lo marca listo, lo cobra en caja y verifica contra PostgreSQL el descuento de inventario, la cadena de eventos, la unicidad de pagos y los reportes. Cada paso deja una captura en `reports/e2e/capturas/` y las evidencias en `reports/e2e/resultados.json`.
 
 ## Fase 2
 

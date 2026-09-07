@@ -117,6 +117,14 @@ El flujo visual de creación y envío de pedidos reportaba errores intermitentes
 - Preparar soporte para horas pico.
 - Mantener proceso manual de reversión.
 
+### Avance técnico 2026-09-05 (validación E2E)
+
+- Suite E2E con Playwright (`npm run test:e2e`, `tests/e2e/flujo-operativo.spec.ts`) que recorre mesero → cocina → caja → inventario → reportes contra la PWA (5173), la API (4000) y PostgreSQL reales, con capturas por paso y comprobaciones directas en la base de datos.
+- Se ejecutó dos veces consecutivas (6/6 verdes cada una): sin pedidos perdidos ni duplicados, cadena de eventos única (CREATED → CONFIRMED → SENT_TO_KITCHEN → KITCHEN_IN_PROGRESS → KITCHEN_READY → COMPLETED), un solo pago por el total y consumo teórico descontado.
+- Informe del piloto con capturas del flujo: `reports/Fase9_Informe_Piloto_Operativo.docx` (generado con `npm run report:fase9`).
+- Pendientes operativos reales para el piloto: menú y precios aprobados, usuarios por rol, capacitación, reinicio de dispositivos, simulación con cierre de turno y soporte.
+- Observación de la prueba: la lista de «Pendientes de pago» en caja se consulta por ID del pedido; conviene poblarla con los pedidos por cobrar para horas pico.
+
 ### Criterios de autorización
 
 - API y base de datos con health check correcto.
@@ -131,12 +139,15 @@ El flujo visual de creación y envío de pedidos reportaba errores intermitentes
 
 ## Fase 10: despliegue multisucursal
 
-- Incorporar una sucursal adicional por vez.
-- Validar aislamiento de datos y permisos.
-- Configurar horarios y disponibilidad por sucursal.
-- Comparar ventas y cierres contra el proceso anterior.
-- Mantener periodo de soporte intensivo.
-- No activar inventario avanzado en todas las sucursales sin datos confiables.
+Avance actual (núcleo técnico completo):
+
+- ~~Incorporar una sucursal adicional por vez~~ — modelo listo: cada sucursal tiene su propio catálogo de disponibilidad, mesas, folios y caja. `POST/PATCH /api/v1/branches` (permiso `branch.manage`) para incorporar sucursales; creación de folios perezosa (el primer pedido inicia folio 1).
+- ~~Configurar horarios y disponibilidad por sucursal~~ — migración `010_branch_scheduling.sql`: `branch_business_hours` (7 días, `check time_from < time_to`) y `branch_product_hours` (ventanas por producto/sucursal, hasta 21 filas). Permiso nuevo `schedule.manage`. Sin filas = abierto/disponible todo el día. Endpoints `GET|PUT /hours` por sucursal y `GET|PUT /products/:productId/hours`.
+- ~~Aplicar horarios en operación~~ — el menú responde `openNow` y `available_now`; agregar productos o enviar a cocina devuelve 409 cuando la sucursal está cerrada o el producto está fuera de su ventana.
+- Validar aislamiento de datos y permisos — cubierto en la suite de integración (`describe('fase 10…')`: 5 pruebas nuevas, folios 1, 409 duplicado, 403 limitado, horarios abiertos/cerrados/400, ventanas aisladas por sucursal). Seed demo con Sucursal Alameda (07:00–22:00, frijol 08:00–14:00).
+- Comparar ventas y cierres contra el proceso anterior — pendiente con datos reales.
+- Mantener periodo de soporte intensivo — pendiente.
+- No activar inventario avanzado en todas las sucursales sin datos confiables — pendiente.
 
 ## Fase 11: pedidos digitales y entregas
 
@@ -177,8 +188,8 @@ Toda recomendación debe ser revisable, desactivable y aprobada por una persona.
 ## Correcciones técnicas pendientes
 
 1. ~~Resolver el flujo E2E de pedidos desde la PWA~~ — resuelto: la confirmación de pedido se enviaba con `Content-Type: application/json` y cuerpo vacío, y Fastify devolvía 500 (`FST_ERR_CTP_EMPTY_JSON_BODY`). Se agregó parser de JSON tolerante en `apps/api/src/app.ts` (cuerpo vacío → `{}`, JSON inválido → 400) y se corrigió la PWA para no enviar `Content-Type` sin cuerpo.
-2. ~~Añadir pruebas de API con PostgreSQL para cada módulo crítico~~ — hechas en `tests/api.integration.test.ts` (29 pruebas) con esquema sembrado por corrida y limpieza autocorrectiva (`purgeTestEnvironments`/`cleanupTestEnvironment`). Cubren autenticación, catálogo, pedidos, cocina, caja, reportes, aislamiento de sucursal/permisos e inventario (incluidos consumo teórico, transferencias, conversiones, concurrencia y compras/proveedores).
-3. Añadir pruebas E2E con navegador.
+2. ~~Añadir pruebas de API con PostgreSQL para cada módulo crítico~~ — hechas en `tests/api.integration.test.ts` (36 pruebas) con esquema sembrado por corrida y limpieza autocorrectiva (`purgeTestEnvironments`/`cleanupTestEnvironment`). Cubren autenticación, catálogo, pedidos, cocina, caja, reportes, aislamiento de sucursal/permisos, inventario (consumo teórico, transferencias, conversiones, concurrencia), compras/proveedores y horarios/disponibilidad por sucursal (Fase 10).
+3. ~~Añadir pruebas E2E con navegador~~ — hecho en la Fase 9: `tests/e2e/flujo-operativo.spec.ts` (6/6 en dos corridas) vía Playwright con Chromium del sistema y `--no-sandbox`. Repetir periódicamente; ahora es sensible a la ventana de horario demo (07:00–22:00).
 4. Reemplazar el bus SSE en memoria cuando existan réplicas.
 5. Agregar rate limiting y protección contra fuerza bruta.
 6. Añadir OpenAPI generado y versionado.
@@ -197,7 +208,7 @@ Toda recomendación debe ser revisable, desactivable y aprobada por una persona.
 6. ~~Incorporar compras y proveedores~~ — Fase 8 completa: proveedores, órdenes de compra, recepciones completas/parciales, devoluciones, diferencias de precio, costos promedio y UI de compras.
 7. Ejecutar piloto formal.
 8. Mejorar reportes con costos y mermas.
-9. Desplegar a más sucursales.
+9. ~~Desplegar a más sucursales~~ — Fase 10 núcleo desplegable: sucursales, horarios y disponibilidad por sucursal desde la PWA (pestaña Sucursales). Pendiente: probar la incorporación con una sucursal real.
 10. Implementar pedidos digitales.
 11. Evaluar IA con datos históricos.
 
