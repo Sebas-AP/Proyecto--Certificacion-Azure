@@ -4,6 +4,7 @@ import { pool } from './db.js';
 import { requireUser, userHasPermission } from './auth.js';
 import { publishKitchenEvent } from './kitchen-events.js';
 import { branchOpenNow, isWithinWindow, branchNow, productAvailableNow } from './scheduling.js';
+import { maskPhone, maskStreet } from './delivery.js';
 
 type User = { id: string; company_id: string };
 const uuid = z.string().uuid();
@@ -109,17 +110,37 @@ export async function registerCatalogOrderRoutes(app: FastifyInstance): Promise<
   });
   app.post('/api/v1/orders', { preHandler: requireUser }, async (request, reply) => {
     if (!(await permission(request, reply, 'order.create'))) return;
-    const input = z.object({ branchId: uuid, tableId: uuid.optional(), channel: z.enum(['DINE_IN','TAKEOUT','DELIVERY']).default('DINE_IN'), notes: z.string().max(500).optional(), idempotencyKey: z.string().trim().min(8).max(120) }).safeParse(request.body); if (!input.success || !(await allowedBranch(request, input.success ? input.data.branchId : ''))) return reply.code(400).send({ error: 'Pedido invalido' });
+    const input = z.object({ branchId: uuid, tableId: uuid.optional(), channel: z.enum(['DINE_IN','TAKEOUT','DELIVERY']).default('DINE_IN'), notes: z.string().max(500).optional(), customerId: uuid.optional(), addressId: uuid.optional(), deliveryZoneId: uuid.optional(), idempotencyKey: z.string().trim().min(8).max(120) }).safeParse(request.body); if (!input.success || !(await allowedBranch(request, input.success ? input.data.branchId : ''))) return reply.code(400).send({ error: 'Pedido invalido' });
     const existing = await pool.query('SELECT * FROM orders WHERE company_id=$1 AND branch_id=$2 AND idempotency_key=$3', [(request.user as User).company_id, input.data.branchId, input.data.idempotencyKey]); if (existing.rowCount) return { data: existing.rows[0], idempotent: true };
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
       if (input.data.tableId) {
+        if (input.data.channel === 'DELIVERY') { await client.query('ROLLBACK'); return reply.code(400).send({ error: 'La mesa no aplica a pedidos a domicilio' }); }
         const table = await client.query('SELECT 1 FROM restaurant_tables WHERE id=$1 AND branch_id=$2 AND company_id=$3 AND status <> \'DISABLED\'', [input.data.tableId, input.data.branchId, (request.user as User).company_id]);
         if (!table.rowCount) { await client.query('ROLLBACK'); return reply.code(400).send({ error: 'Mesa no pertenece a la sucursal' }); }
       }
+      let customerId: string | null = null; let addressId: string | null = null; let deliveryZoneId: string | null = null; let deliveryFee = 0;
+      if (input.data.customerId) {
+        const customer = await client.query('SELECT 1 FROM customers WHERE id=$1 AND company_id=$2', [input.data.customerId, (request.user as User).company_id]);
+        if (!customer.rowCount) { await client.query('ROLLBACK'); return reply.code(400).send({ error: 'Cliente no encontrado' }); }
+        customerId = input.data.customerId;
+      }
+      if (input.data.addressId) {
+        if (!customerId) { await client.query('ROLLBACK'); return reply.code(400).send({ error: 'La direccion requiere un cliente' }); }
+        const address = await client.query('SELECT 1 FROM customer_addresses WHERE id=$1 AND customer_id=$2', [input.data.addressId, customerId]);
+        if (!address.rowCount) { await client.query('ROLLBACK'); return reply.code(400).send({ error: 'La direccion no pertenece al cliente' }); }
+        addressId = input.data.addressId;
+      }
+      if (input.data.channel === 'DELIVERY' && (!customerId || !addressId)) { await client.query('ROLLBACK'); return reply.code(400).send({ error: 'Pedido a domicilio requiere cliente y direccion' }); }
+      if (input.data.deliveryZoneId) {
+        const zone = await client.query('SELECT fee FROM delivery_zones WHERE id=$1 AND company_id=$2', [input.data.deliveryZoneId, (request.user as User).company_id]);
+        if (!zone.rowCount) { await client.query('ROLLBACK'); return reply.code(400).send({ error: 'Zona de entrega invalida' }); }
+        deliveryZoneId = input.data.deliveryZoneId; deliveryFee = Number(zone.rows[0].fee);
+      }
+      const confirmationToken = input.data.channel === 'TAKEOUT' || input.data.channel === 'DELIVERY' ? crypto.randomUUID() : null;
       const sequence = await client.query('INSERT INTO branch_order_sequences (branch_id) VALUES ($1) ON CONFLICT (branch_id) DO UPDATE SET next_folio=branch_order_sequences.next_folio+1 RETURNING next_folio AS folio', [input.data.branchId]);
-      const result = await client.query('INSERT INTO orders (company_id,branch_id,table_id,folio,channel,notes,idempotency_key,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *', [(request.user as User).company_id, input.data.branchId, input.data.tableId ?? null, sequence.rows[0].folio, input.data.channel, input.data.notes ?? null, input.data.idempotencyKey, (request.user as User).id]);
+      const result = await client.query('INSERT INTO orders (company_id,branch_id,table_id,folio,channel,notes,idempotency_key,created_by,customer_id,address_id,delivery_zone_id,delivery_fee,client_confirmation_token) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *', [(request.user as User).company_id, input.data.branchId, input.data.tableId ?? null, sequence.rows[0].folio, input.data.channel, input.data.notes ?? null, input.data.idempotencyKey, (request.user as User).id, customerId, addressId, deliveryZoneId, deliveryFee, confirmationToken]);
       await client.query('INSERT INTO order_events (order_id,event_type,to_status,actor_id,idempotency_key) VALUES ($1,\'CREATED\',\'DRAFT\',$2,$3)', [result.rows[0].id, (request.user as User).id, input.data.idempotencyKey]);
       await client.query('COMMIT');
       return reply.code(201).send({ data: result.rows[0], idempotent: false });
@@ -154,4 +175,20 @@ async function updateOrderStatus(request: FastifyRequest, reply: FastifyReply, p
 
 async function sendKitchen(request: FastifyRequest, reply: FastifyReply, key: string) { const client=await pool.connect(); try { await client.query('BEGIN'); const order=(await client.query('SELECT * FROM orders WHERE id=$1 AND company_id=$2 FOR UPDATE',[params(request).id,(request.user as User).company_id])).rows[0]; if (!order) { await client.query('ROLLBACK'); return reply.code(404).send({error:'Pedido no encontrado'}); } const open=await branchOpenNow(order.branch_id); if(!open.openNow) { await client.query('ROLLBACK'); return reply.code(409).send({error:'Sucursal cerrada en este horario'}); } const prior=await client.query('SELECT id FROM order_events WHERE order_id=$1 AND event_type=\'SENT_TO_KITCHEN\' AND idempotency_key=$2',[order.id,key]); if(prior.rowCount) { await client.query('ROLLBACK'); return {data:order,idempotent:true}; } if(!['CONFIRMED','SENT_TO_KITCHEN'].includes(order.status)) { await client.query('ROLLBACK'); return reply.code(409).send({error:'El pedido no puede enviarse a cocina'}); } const items=await client.query('UPDATE order_items SET sent_at=now() WHERE order_id=$1 AND sent_at IS NULL RETURNING id',[order.id]); if(!items.rowCount && order.status==='CONFIRMED') { await client.query('ROLLBACK'); return reply.code(409).send({error:'No hay articulos pendientes de enviar'}); } const updated=await client.query('UPDATE orders SET status=\'SENT_TO_KITCHEN\',kitchen_status=COALESCE(kitchen_status,\'PENDING\'),updated_at=now() WHERE id=$1 RETURNING *',[order.id]); await client.query('INSERT INTO order_events (order_id,event_type,from_status,to_status,actor_id,idempotency_key) VALUES ($1,\'SENT_TO_KITCHEN\',$2,\'SENT_TO_KITCHEN\',$3,$4)',[order.id,order.status,(request.user as User).id,key]); await client.query('COMMIT'); publishKitchenEvent((request.user as User).company_id, { id: crypto.randomUUID(), type: 'order.sent_to_kitchen', branchId: updated.rows[0].branch_id, orderId: updated.rows[0].id, status: updated.rows[0].kitchen_status, occurredAt: new Date().toISOString() }); return {data:updated.rows[0],sentItems:items.rowCount,idempotent:false}; } catch(error) { await client.query('ROLLBACK'); throw error; } finally {client.release();} }
 
-async function getOrder(request: FastifyRequest, reply: FastifyReply, events: boolean) { if (!(await permission(request,reply,'order.read'))) return; const result=await pool.query('SELECT * FROM orders WHERE id=$1 AND company_id=$2',[params(request).id,(request.user as User).company_id]); if(!result.rowCount) return reply.code(404).send({error:'Pedido no encontrado'}); if(events) return {data:(await pool.query('SELECT * FROM order_events WHERE order_id=$1 ORDER BY created_at',[params(request).id])).rows}; return {data:result.rows[0],items:(await pool.query('SELECT oi.*,COALESCE(json_agg(oim) FILTER (WHERE oim.id IS NOT NULL),\'[]\') modifiers FROM order_items oi LEFT JOIN order_item_modifiers oim ON oim.order_item_id=oi.id WHERE oi.order_id=$1 GROUP BY oi.id ORDER BY oi.created_at',[params(request).id])).rows}; }
+async function getOrder(request: FastifyRequest, reply: FastifyReply, events: boolean) { if (!(await permission(request,reply,'order.read'))) return;
+  const result=await pool.query(`SELECT o.*, c.id customer_id_ref, c.name customer_inline_name, c.phone customer_inline_phone, c.email customer_inline_email,
+      a.id address_id_ref, a.label address_inline_label, a.street address_inline_street, a.neighborhood address_inline_neighborhood, a.city address_inline_city, a.reference address_inline_reference,
+      z.name zone_inline_name, cou.name courier_inline_name
+      FROM orders o LEFT JOIN customers c ON c.id=o.customer_id LEFT JOIN customer_addresses a ON a.id=o.address_id
+      LEFT JOIN delivery_zones z ON z.id=o.delivery_zone_id LEFT JOIN couriers cou ON cou.id=o.courier_id
+      WHERE o.id=$1 AND o.company_id=$2`,[params(request).id,(request.user as User).company_id]);
+  if(!result.rowCount) return reply.code(404).send({error:'Pedido no encontrado'});
+  if(events) return {data:(await pool.query('SELECT * FROM order_events WHERE order_id=$1 ORDER BY created_at',[params(request).id])).rows};
+  const row=result.rows[0];
+  const manage=await userHasPermission((request.user as User).id,'customer.manage');
+  const data: Record<string, unknown>={...row};
+  data.customer=row.customer_id_ref?{id:row.customer_id_ref,name:row.customer_inline_name,phone:manage?row.customer_inline_phone:maskPhone(row.customer_inline_phone),phone_masked:maskPhone(row.customer_inline_phone),email:row.customer_inline_email}:null;
+  data.delivery=row.address_id_ref?{address_label:row.address_inline_label,street:manage?row.address_inline_street:maskStreet(row.address_inline_street),street_masked:maskStreet(row.address_inline_street),neighborhood:row.address_inline_neighborhood,city:row.address_inline_city,reference:row.address_inline_reference,zone_name:row.zone_inline_name,delivery_fee:row.delivery_fee,delivery_status:row.delivery_status,status:row.status,courier_name:row.courier_inline_name,needs_attention:row.needs_attention,attention_reason:row.attention_reason,client_confirmed:!!row.client_confirmed_at}:null;
+  for(const key of ['customer_id_ref','customer_inline_name','customer_inline_phone','customer_inline_email','address_id_ref','address_inline_label','address_inline_street','address_inline_neighborhood','address_inline_city','address_inline_reference','zone_inline_name','courier_inline_name']) delete data[key];
+  return {data,items:(await pool.query('SELECT oi.*,COALESCE(json_agg(oim) FILTER (WHERE oim.id IS NOT NULL),\'[]\') modifiers FROM order_items oi LEFT JOIN order_item_modifiers oim ON oim.order_item_id=oi.id WHERE oi.order_id=$1 GROUP BY oi.id ORDER BY oi.created_at',[params(request).id])).rows};
+}

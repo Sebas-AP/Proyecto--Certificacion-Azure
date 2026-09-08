@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import bcrypt from 'bcryptjs';
 import { migrate, seedTestEnvironment, cleanupTestEnvironment, purgeTestEnvironments, closePool, type TestEnvironment } from './support.js';
 import { pool } from '../apps/api/src/db.js';
 
@@ -900,5 +901,172 @@ describe('fase 10: sucursales, horarios y disponibilidad', () => {
     await call(adminCookie, 'PUT', `/api/v1/branches/${env.branchId}/products/${env.productId}/hours`, { windows: [] });
     const after = await call(adminCookie, 'GET', `/api/v1/branches/${env.branchId}/menu`);
     expect(after.json.data.find((p: { id: string }) => p.id === env.productId).available_now).toBe(true);
+  });
+});
+describe('fase 11: clientes, repartidores y entregas', () => {
+  let customerId: string;
+  let customerTwoId: string;
+  let addressId: string;
+  let addressTwoId: string;
+  let zoneId: string;
+  let courierId: string;
+  let deliveryCookie: string;
+  let deliveryOrderId: string;
+  let deliveryOrderToken: string;
+
+  beforeAll(async () => {
+    const role = await pool.query(`INSERT INTO roles (company_id,name) VALUES ($1,'Entrega lectura') RETURNING id`, [env.companyId]);
+    await pool.query(`INSERT INTO role_permissions (role_id,permission_id) SELECT $1,id FROM permissions WHERE code IN ('branch.read','order.read','catalog.read','customer.read','courier.read') ON CONFLICT DO NOTHING`, [role.rows[0].id]);
+    const passwordHash = bcrypt.hashSync(env.password, 4);
+    const user = await pool.query(`INSERT INTO users (company_id,email,display_name,password_hash) VALUES ($1,$2,'Usuario entrega',$3) RETURNING id`, [env.companyId, 'entrega@prueba.local', passwordHash]);
+    await pool.query('INSERT INTO user_roles (user_id,role_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [user.rows[0].id, role.rows[0].id]);
+    await pool.query(`INSERT INTO user_branches (user_id,branch_id) SELECT $1,id FROM branches WHERE company_id=$2 ON CONFLICT DO NOTHING`, [user.rows[0].id, env.companyId]);
+    deliveryCookie = await login('entrega@prueba.local', env.password);
+  });
+
+  it('gestiona clientes y direcciones protegiendo telefonos y calles', async () => {
+    const created = await call(adminCookie, 'POST', '/api/v1/customers', { name: 'Cliente de prueba', phone: '5512345678' });
+    expect(created.status).toBe(201);
+    customerId = created.json.data.id;
+    const duplicate = await call(adminCookie, 'POST', '/api/v1/customers', { name: 'Otro', phone: '5512345678' });
+    expect(duplicate.status).toBe(409);
+    const second = await call(adminCookie, 'POST', '/api/v1/customers', { name: 'Segundo cliente', phone: '5587654321' });
+    expect(second.status).toBe(201);
+    customerTwoId = second.json.data.id;
+    const forbiddenCreate = await call(deliveryCookie, 'POST', '/api/v1/customers', { name: 'No', phone: '9999999999' });
+    expect(forbiddenCreate.status).toBe(403);
+
+    const addr = await call(adminCookie, 'POST', `/api/v1/customers/${customerId}/addresses`, { label: 'Casa', street: 'Calle del Maiz 45', city: 'Ciudad de prueba' });
+    expect(addr.status).toBe(201);
+    addressId = addr.json.data.id;
+    const addrTwo = await call(adminCookie, 'POST', `/api/v1/customers/${customerTwoId}/addresses`, { label: 'Trabajo', street: 'Av. Central 999' });
+    expect(addrTwo.status).toBe(201);
+    addressTwoId = addrTwo.json.data.id;
+
+    const masked = await call(deliveryCookie, 'GET', '/api/v1/customers');
+    expect(masked.status).toBe(200);
+    const maskedRow = masked.json.data.find((c: { id: string }) => c.id === customerId);
+    expect(maskedRow.phone_masked).toMatch(/\*{4}/);
+    expect(maskedRow.phone).toContain('****');
+    expect(maskedRow.phone).not.toBe('5512345678');
+
+    const full = await call(adminCookie, 'GET', '/api/v1/customers');
+    expect(full.json.data.find((c: { id: string }) => c.id === customerId).phone).toBe('5512345678');
+
+    const maskedAddresses = await call(deliveryCookie, 'GET', `/api/v1/customers/${customerId}/addresses`);
+    expect(maskedAddresses.status).toBe(200);
+    expect(maskedAddresses.json.data[0].street).not.toBe('Calle del Maiz 45');
+    expect(maskedAddresses.json.data[0].street_masked).toBeDefined();
+    const fullAddresses = await call(adminCookie, 'GET', `/api/v1/customers/${customerId}/addresses`);
+    expect(fullAddresses.json.data[0].street).toBe('Calle del Maiz 45');
+  });
+
+  it('gestiona zonas y repartidores con permisos', async () => {
+    const zone = await call(adminCookie, 'POST', '/api/v1/delivery-zones', { name: 'Centro', fee: 25 });
+    expect(zone.status).toBe(201);
+    zoneId = zone.json.data.id;
+    const zoneDup = await call(adminCookie, 'POST', '/api/v1/delivery-zones', { name: 'Centro', fee: 10 });
+    expect(zoneDup.status).toBe(409);
+    const zonesRead = await call(deliveryCookie, 'GET', '/api/v1/delivery-zones');
+    expect(zonesRead.status).toBe(200);
+    const zoneWrite = await call(deliveryCookie, 'POST', '/api/v1/delivery-zones', { name: 'No', fee: 5 });
+    expect(zoneWrite.status).toBe(403);
+
+    const courier = await call(adminCookie, 'POST', '/api/v1/couriers', { name: 'Repartidor demo', phone: '555-0199', type: 'INTERNAL' });
+    expect(courier.status).toBe(201);
+    courierId = courier.json.data.id;
+    expect((await call(deliveryCookie, 'GET', '/api/v1/couriers')).status).toBe(200);
+    expect((await call(deliveryCookie, 'POST', '/api/v1/couriers', { name: 'No' })).status).toBe(403);
+  });
+
+  it('valida pedidos a domicilio y cobra el costo de zona', async () => {
+    const noCustomer = await call(adminCookie, 'POST', '/api/v1/orders', { branchId: env.branchId, channel: 'DELIVERY', idempotencyKey: `dom-${crypto.randomUUID()}` });
+    expect(noCustomer.status).toBe(400);
+    expect(noCustomer.json.error).toContain('domicilio');
+    const noAddress = await call(adminCookie, 'POST', '/api/v1/orders', { branchId: env.branchId, channel: 'DELIVERY', customerId, idempotencyKey: `dom-${crypto.randomUUID()}` });
+    expect(noAddress.status).toBe(400);
+    const mismatched = await call(adminCookie, 'POST', '/api/v1/orders', { branchId: env.branchId, channel: 'DELIVERY', customerId, addressId: addressTwoId, idempotencyKey: `dom-${crypto.randomUUID()}` });
+    expect(mismatched.status).toBe(400);
+    expect(mismatched.json.error).toContain('pertenece');
+    const withTable = await call(adminCookie, 'POST', '/api/v1/orders', { branchId: env.branchId, tableId: env.tableId, channel: 'DELIVERY', customerId, addressId, idempotencyKey: `dom-${crypto.randomUUID()}` });
+    expect(withTable.status).toBe(400);
+
+    const created = await call(adminCookie, 'POST', '/api/v1/orders', { branchId: env.branchId, channel: 'DELIVERY', customerId, addressId, deliveryZoneId: zoneId, idempotencyKey: `dom-${crypto.randomUUID()}` });
+    expect(created.status).toBe(201);
+    deliveryOrderId = created.json.data.id;
+    deliveryOrderToken = created.json.data.client_confirmation_token;
+    expect(Number(created.json.data.delivery_fee)).toBe(25);
+    expect(created.json.data.channel).toBe('DELIVERY');
+    expect(deliveryOrderToken).toBeTruthy();
+
+    const item = await call(adminCookie, 'POST', `/api/v1/orders/${deliveryOrderId}/items`, { productId: env.productId, variantId: env.variantId, quantity: 1 });
+    expect(item.status).toBe(201);
+    const confirmed = await call(adminCookie, 'POST', `/api/v1/orders/${deliveryOrderId}/confirm`);
+    expect(confirmed.status).toBe(200);
+    expect(Number(confirmed.json.data.total)).toBe(35);
+
+    const detail = await call(adminCookie, 'GET', `/api/v1/orders/${deliveryOrderId}`);
+    expect(detail.json.data.customer.name).toBe('Cliente de prueba');
+    expect(detail.json.data.delivery.zone_name).toBe('Centro');
+    expect(Number(detail.json.data.delivery.delivery_fee)).toBe(25);
+
+    const maskedDetail = await call(deliveryCookie, 'GET', `/api/v1/orders/${deliveryOrderId}`);
+    expect(maskedDetail.json.data.customer.phone).toContain('****');
+    expect(maskedDetail.json.data.delivery.street).not.toBe('Calle del Maiz 45');
+  });
+
+  it('confirma al cliente por token y escala para atencion humana', async () => {
+    const bad = await call('', 'POST', '/api/v1/orders/confirm-by-token', { token: 'token-invalido-000000' });
+    expect(bad.status).toBe(404);
+    const confirmed = await call('', 'POST', '/api/v1/orders/confirm-by-token', { token: deliveryOrderToken });
+    expect(confirmed.status).toBe(200);
+    expect(confirmed.json.data.confirmed).toBe(true);
+    const again = await call('', 'POST', '/api/v1/orders/confirm-by-token', { token: deliveryOrderToken });
+    expect(again.json.idempotent).toBe(true);
+
+    const flagDenied = await call(deliveryCookie, 'POST', `/api/v1/orders/${deliveryOrderId}/flag-attention`, { reason: 'Revisar' });
+    expect(flagDenied.status).toBe(403);
+    const flagged = await call(adminCookie, 'POST', `/api/v1/orders/${deliveryOrderId}/flag-attention`, { reason: 'Falta confirmar el total' });
+    expect(flagged.status).toBe(200);
+    expect(flagged.json.data.needs_attention).toBe(true);
+
+    const detail = await call(adminCookie, 'GET', `/api/v1/orders/${deliveryOrderId}`);
+    expect(detail.json.data.delivery.client_confirmed).toBe(true);
+  });
+
+  it('asigna repartidor, sale a reparto y entrega, con permisos', async () => {
+    const forbidden = await call(deliveryCookie, 'POST', `/api/v1/orders/${deliveryOrderId}/assign-courier`, { courierId });
+    expect(forbidden.status).toBe(403);
+
+    const dine = await call(adminCookie, 'POST', '/api/v1/orders', { branchId: env.branchId, tableId: env.tableId, channel: 'DINE_IN', idempotencyKey: `dom-nodom-${crypto.randomUUID()}` });
+    const notDelivery = await call(adminCookie, 'POST', `/api/v1/orders/${dine.json.data.id}/assign-courier`, { courierId });
+    expect(notDelivery.status).toBe(409);
+    expect(notDelivery.json.error).toContain('domicilio');
+
+    const assigned = await call(adminCookie, 'POST', `/api/v1/orders/${deliveryOrderId}/assign-courier`, { courierId });
+    expect(assigned.status).toBe(200);
+    expect(assigned.json.data.delivery_status).toBe('COURIER_ASSIGNED');
+    expect(assigned.json.data.needs_attention).toBe(false);
+
+    const queue = await call(adminCookie, 'GET', `/api/v1/branches/${env.branchId}/delivery/queue`);
+    expect(queue.status).toBe(200);
+    const queueRow = queue.json.data.find((o: { id: string }) => o.id === deliveryOrderId);
+    expect(queueRow).toBeTruthy();
+    expect(queueRow.courier_name).toBe('Repartidor demo');
+    expect(queueRow.customer_phone).toBe('5512345678');
+
+    const out = await call(adminCookie, 'POST', `/api/v1/orders/${deliveryOrderId}/out-for-delivery`);
+    expect(out.status).toBe(200);
+    expect(out.json.data.delivery_status).toBe('OUT_FOR_DELIVERY');
+    const reassign = await call(adminCookie, 'POST', `/api/v1/orders/${deliveryOrderId}/assign-courier`, { courierId });
+    expect(reassign.status).toBe(409);
+
+    const delivered = await call(adminCookie, 'POST', `/api/v1/orders/${deliveryOrderId}/delivered`);
+    expect(delivered.status).toBe(200);
+    expect(delivered.json.data.delivery_status).toBe('DELIVERED');
+    expect((await call(adminCookie, 'POST', `/api/v1/orders/${deliveryOrderId}/delivered`)).status).toBe(409);
+
+    const queueAfter = await call(adminCookie, 'GET', `/api/v1/branches/${env.branchId}/delivery/queue`);
+    expect(queueAfter.json.data.some((o: { id: string }) => o.id === deliveryOrderId)).toBe(false);
   });
 });

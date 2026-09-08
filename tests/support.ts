@@ -20,6 +20,7 @@ const MIGRATIONS = [
   '008_purchasing.sql',
   '009_purchasing_returns.sql',
   '010_branch_scheduling.sql',
+  '011_delivery.sql',
 ];
 
 export async function migrate(): Promise<void> {
@@ -133,6 +134,10 @@ async function deleteCompanyData(client: { query: (text: string, values?: unknow
   await client.query(`DELETE FROM order_item_modifiers WHERE order_item_id IN (SELECT oi.id FROM order_items oi JOIN orders o ON o.id=oi.order_id WHERE o.company_id=$1)`, [companyId]);
   await client.query(`DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE company_id=$1)`, [companyId]);
   await client.query(`DELETE FROM orders WHERE company_id=$1`, [companyId]);
+  await client.query(`DELETE FROM customer_addresses WHERE customer_id IN (SELECT id FROM customers WHERE company_id=$1)`, [companyId]);
+  await client.query(`DELETE FROM customers WHERE company_id=$1`, [companyId]);
+  await client.query(`DELETE FROM delivery_zones WHERE company_id=$1`, [companyId]);
+  await client.query(`DELETE FROM couriers WHERE company_id=$1`, [companyId]);
   await client.query(`DELETE FROM branch_product_availability WHERE branch_id IN (SELECT id FROM branches WHERE company_id=$1)`, [companyId]);
   await client.query(`DELETE FROM restaurant_tables WHERE company_id=$1`, [companyId]);
   await client.query(`DELETE FROM product_prices WHERE variant_id IN (SELECT pv.id FROM product_variants pv JOIN products p ON p.id=pv.product_id WHERE p.company_id=$1)`, [companyId]);

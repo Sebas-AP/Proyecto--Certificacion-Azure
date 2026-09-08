@@ -1,43 +1,43 @@
 {
-  "name": "gorditasos",
-  "version": "0.1.0",
-  "private": true,
-  "description": "Plataforma multisucursal para la operacion de restaurantes de gorditas",
-  "type": "module",
-  "scripts": {
-    "dev": "tsx watch apps/api/src/server.ts",
-    "dev:web": "vite --config apps/web/vite.config.ts",
-    "dev:frontend": "npm run dev:web",
-    "dev:all": "bash scripts/levantar.sh",
-    "build": "tsc -p tsconfig.json",
-    "build:web": "vite build --config apps/web/vite.config.ts",
-    "build:all": "npm run build && npm run build:web",
-    "start": "node dist/apps/api/src/server.js",
-    "test": "vitest run",
-    "test:integration": "vitest run --config vitest.integration.config.ts",
-    "test:e2e": "playwright test",
-    "report:fase9": "node scripts/generar-informe-fase9.mjs",
-    "test:watch": "vitest",
-    "db:migrate": "psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f infrastructure/migrations/001_initial_core.sql -f infrastructure/migrations/002_catalog_orders.sql -f infrastructure/migrations/003_kitchen.sql -f infrastructure/migrations/004_cash_payments.sql -f infrastructure/migrations/005_reports_pilot.sql -f infrastructure/migrations/006_inventory.sql -f infrastructure/migrations/007_inventory_consumption.sql -f infrastructure/migrations/008_purchasing.sql -f infrastructure/migrations/009_purchasing_returns.sql -f infrastructure/migrations/010_branch_scheduling.sql",
-    "db:seed": "tsx apps/api/src/seed.ts"
-  },
-  "dependencies": {
-    "@fastify/cookie": "^11.0.2",
-    "@fastify/cors": "^11.0.0",
-    "bcryptjs": "^3.0.2",
-    "dotenv": "^17.2.1",
-    "fastify": "^5.4.0",
-    "pg": "^8.16.3",
-    "zod": "^4.0.10"
-  },
-  "devDependencies": {
-    "@playwright/test": "^1.63.0",
-    "@types/node": "^24.3.0",
-    "@types/pg": "^8.15.5",
-    "docx": "^9.7.1",
-    "tsx": "^4.20.3",
-    "typescript": "^5.9.2",
-    "vite": "^7.3.6",
-    "vitest": "^3.2.4"
-  }
+ "name": "gorditasos",
+ "version": "0.1.0",
+ "private": true,
+ "description": "Plataforma multisucursal para la operacion de restaurantes de gorditas",
+ "type": "module",
+ "scripts": {
+  "dev": "tsx watch apps/api/src/server.ts",
+  "dev:web": "vite --config apps/web/vite.config.ts",
+  "dev:frontend": "npm run dev:web",
+  "dev:all": "bash scripts/levantar.sh",
+  "build": "tsc -p tsconfig.json",
+  "build:web": "vite build --config apps/web/vite.config.ts",
+  "build:all": "npm run build && npm run build:web",
+  "start": "node dist/apps/api/src/server.js",
+  "test": "vitest run",
+  "test:integration": "vitest run --config vitest.integration.config.ts",
+  "test:e2e": "playwright test",
+  "report:fase9": "node scripts/generar-informe-fase9.mjs",
+  "test:watch": "vitest",
+  "db:migrate": "psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f infrastructure/migrations/001_initial_core.sql -f infrastructure/migrations/002_catalog_orders.sql -f infrastructure/migrations/003_kitchen.sql -f infrastructure/migrations/004_cash_payments.sql -f infrastructure/migrations/005_reports_pilot.sql -f infrastructure/migrations/006_inventory.sql -f infrastructure/migrations/007_inventory_consumption.sql -f infrastructure/migrations/008_purchasing.sql -f infrastructure/migrations/009_purchasing_returns.sql -f infrastructure/migrations/010_branch_scheduling.sql -f infrastructure/migrations/011_delivery.sql",
+  "db:seed": "tsx apps/api/src/seed.ts"
+ },
+ "dependencies": {
+  "@fastify/cookie": "^11.0.2",
+  "@fastify/cors": "^11.0.0",
+  "bcryptjs": "^3.0.2",
+  "dotenv": "^17.2.1",
+  "fastify": "^5.4.0",
+  "pg": "^8.16.3",
+  "zod": "^4.0.10"
+ },
+ "devDependencies": {
+  "@playwright/test": "^1.63.0",
+  "@types/node": "^24.3.0",
+  "@types/pg": "^8.15.5",
+  "docx": "^9.7.1",
+  "tsx": "^4.20.3",
+  "typescript": "^5.9.2",
+  "vite": "^7.3.6",
+  "vitest": "^3.2.4"
+ }
 }

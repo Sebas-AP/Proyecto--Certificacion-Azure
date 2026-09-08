@@ -276,8 +276,36 @@ try {
     [companyId],
   );
 
+  const demoCustomer = await client.query(
+    `INSERT INTO customers (company_id, name, phone)
+     VALUES ($1, 'Lupita Lopez', '5512345678')
+     ON CONFLICT (company_id, phone) DO UPDATE SET name = EXCLUDED.name, is_active = true
+     RETURNING id`,
+    [companyId],
+  );
+  await client.query(
+    `INSERT INTO customer_addresses (customer_id, label, street, neighborhood, city, reference)
+     VALUES ($1, 'Casa', 'Av. Juarez 123', 'Centro', 'Ciudad de demostracion', 'Porton azul')
+     ON CONFLICT (customer_id, label) DO UPDATE
+       SET street = EXCLUDED.street, neighborhood = EXCLUDED.neighborhood,
+           city = EXCLUDED.city, reference = EXCLUDED.reference`,
+    [demoCustomer.rows[0].id],
+  );
+  await client.query(
+    `INSERT INTO delivery_zones (company_id, name, fee)
+     VALUES ($1, 'Centro', 25)
+     ON CONFLICT (company_id, name) DO UPDATE SET fee = EXCLUDED.fee, is_active = true`,
+    [companyId],
+  );
+  await client.query(
+    `INSERT INTO couriers (company_id, name, phone, type)
+     SELECT $1, 'Maria · Repartidora demo', '555-0199', 'INTERNAL'
+     WHERE NOT EXISTS (SELECT 1 FROM couriers WHERE company_id = $1 AND name = 'Maria · Repartidora demo')`,
+    [companyId],
+  );
+
   await client.query('COMMIT');
-  console.log('Seed completado: admin@demo.local, catalogo demo, mesas, inventario y configuracion basica');
+  console.log('Seed completado: admin@demo.local, catalogo demo, mesas, inventario, clientes y configuracion basica');
 } catch (error) {
   await client.query('ROLLBACK');
   throw error;

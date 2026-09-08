@@ -151,17 +151,23 @@ Avance actual (núcleo técnico completo):
 
 ## Fase 11: pedidos digitales y entregas
 
-- Clientes y direcciones.
-- Pedidos para llevar y domicilio.
-- Repartidores.
-- Estados de entrega.
-- Zonas y costos.
-- Adaptador de mensajería oficial.
-- Confirmación explícita del cliente.
-- Escalamiento humano.
-- Protección de teléfonos y direcciones.
+Avance actual (núcleo técnico completo):
 
-No iniciar esta fase hasta que pedidos internos, caja y reportes estén estables.
+- ~~Clientes y direcciones~~ — migración `011_delivery.sql`: `customers`, `customer_addresses` (con `UNIQUE(customer_id,label)`), permisos `customer.read`/`customer.manage` con búsqueda por nombre/teléfono y
+  **protección de PII**: teléfonos y calles se devuelven enmascarados (`551****78`) salvo quien tenga `customer.manage`.
+- ~~Pedidos para llevar y domicilio~~ — `POST /orders` acepta `channel` `TAKEOUT`/`DELIVERY`, `customerId`, `addressId` y `deliveryZoneId`; para domicilio son obligatorios cliente y dirección, y la mesa queda prohibida. El costo de la zona se
+  **duplica** como `delivery_fee` al crear (desnormalización, igual que precios).
+- ~~Repartidores~~ — `couriers` (`INTERNAL`/`EXTERNAL`) con permisos `courier.read`/`courier.manage`.
+- ~~Estados de entrega~~ — `orders.delivery_status` (`PENDING`→`COURIER_ASSIGNED`→`OUT_FOR_DELIVERY`→`DELIVERED`) con
+  cola `/branches/:branchId/delivery/queue`, evento y auditoría por transición.
+- ~~Zonas y costos~~ — `delivery_zones` con tarifa por zona.
+- ~~Confirmación explícita del cliente~~ — `POST /api/v1/orders/confirm-by-token` (sin sesión, idempotente) confirma el pedido
+  con un token único generado al crear (`client_confirmation_token`); registra `CUSTOMER_CONFIRMED`.
+- ~~Escalamiento humano~~ — `POST /orders/:id/flag-attention` marca `needs_attention` + motivo y evento `DELIVERY_ESCALATED`; se
+  autolimpia al asignar repartidor, salir a reparto, entregar o confirmar el cliente.
+- ~~Protección de teléfonos y direcciones~~ — ver clientes/direcciones arriba; aplica también al detalle de pedido y a la cola de entregas.
+- Adaptador de mensajería oficial — fuera de alcance por la regla de alcance (confirmación explícita por enlace ya cubre el mínimo).
+- Pendiente operativo: definir flujo de caja para reparto (cobro contra entrega), probar incorporación con operación real.
 
 ## Fase 12: analítica e inteligencia artificial
 
@@ -188,7 +194,7 @@ Toda recomendación debe ser revisable, desactivable y aprobada por una persona.
 ## Correcciones técnicas pendientes
 
 1. ~~Resolver el flujo E2E de pedidos desde la PWA~~ — resuelto: la confirmación de pedido se enviaba con `Content-Type: application/json` y cuerpo vacío, y Fastify devolvía 500 (`FST_ERR_CTP_EMPTY_JSON_BODY`). Se agregó parser de JSON tolerante en `apps/api/src/app.ts` (cuerpo vacío → `{}`, JSON inválido → 400) y se corrigió la PWA para no enviar `Content-Type` sin cuerpo.
-2. ~~Añadir pruebas de API con PostgreSQL para cada módulo crítico~~ — hechas en `tests/api.integration.test.ts` (36 pruebas) con esquema sembrado por corrida y limpieza autocorrectiva (`purgeTestEnvironments`/`cleanupTestEnvironment`). Cubren autenticación, catálogo, pedidos, cocina, caja, reportes, aislamiento de sucursal/permisos, inventario (consumo teórico, transferencias, conversiones, concurrencia), compras/proveedores y horarios/disponibilidad por sucursal (Fase 10).
+2. ~~Añadir pruebas de API con PostgreSQL para cada módulo crítico~~ — hechas en `tests/api.integration.test.ts` (41 pruebas) con esquema sembrado por corrida y limpieza autocorrectiva (`purgeTestEnvironments`/`cleanupTestEnvironment`). Cubren autenticación, catálogo, pedidos, cocina, caja, reportes, aislamiento de sucursal/permisos, inventario (consumo teórico, transferencias, conversiones, concurrencia), compras/proveedores, horarios/disponibilidad por sucursal (Fase 10) y clientes/repartidores/entregas con confirmación por token y PII (Fase 11).
 3. ~~Añadir pruebas E2E con navegador~~ — hecho en la Fase 9: `tests/e2e/flujo-operativo.spec.ts` (6/6 en dos corridas) vía Playwright con Chromium del sistema y `--no-sandbox`. Repetir periódicamente; ahora es sensible a la ventana de horario demo (07:00–22:00).
 4. Reemplazar el bus SSE en memoria cuando existan réplicas.
 5. Agregar rate limiting y protección contra fuerza bruta.
@@ -209,7 +215,7 @@ Toda recomendación debe ser revisable, desactivable y aprobada por una persona.
 7. Ejecutar piloto formal.
 8. Mejorar reportes con costos y mermas.
 9. ~~Desplegar a más sucursales~~ — Fase 10 núcleo desplegable: sucursales, horarios y disponibilidad por sucursal desde la PWA (pestaña Sucursales). Pendiente: probar la incorporación con una sucursal real.
-10. Implementar pedidos digitales.
+10. ~~Implementar pedidos digitales~~ — Fase 11 núcleo técnico completo (clientes/direcciones, para llevar/domicilio, repartidores, estados, zonas y costos, confirmación por token, escalamiento humano y protección de PII). Pendiente: interfaz PWA de mesero/despacho y cobro contra entrega.
 11. Evaluar IA con datos históricos.
 
 ## Regla de alcance
